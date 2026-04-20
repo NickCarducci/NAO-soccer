@@ -1,0 +1,6 @@
+{
+  "python.defaultInterpreterPath": "/Users/nicholascarducci/.pyenv/versions/2.7.18/bin/python2.7",
+  "python.pythonPath": "/Users/nicholascarducci/.pyenv/versions/2.7.18/bin/python2.7",
+  "python.terminal.activateEnvironment": false,
+  "python-envs.defaultEnvManager": "ms-python.python:pyenv"
+}

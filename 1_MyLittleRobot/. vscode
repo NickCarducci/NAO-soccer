@@ -1,0 +1,5 @@
+{
+    "python.analysis.extraPaths": [
+        "/Users/nicholascarducci/Downloads/naoqi-sdk-folder/lib/python2.7/site-packages"
+    ]
+}
