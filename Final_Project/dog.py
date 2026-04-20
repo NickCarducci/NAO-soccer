@@ -1,7 +1,8 @@
 #!/Users/nicholascarducci/.pyenv/versions/2.7.18/bin/python2.7
 """
 NAO Soccer-Dog Brain
-One unified behaviour: forward drive + sonar avoidance + ball seeking.
+One unified behaviour: forward drive + sonar obstacle avoidance + ball seeking.
+Voice commands are a human fallback only -- the robot handles navigation autonomously.
 
 Movement priority (highest to lowest):
   1. DANGER sonar     -- stop, Roomba-spin until clear, resume

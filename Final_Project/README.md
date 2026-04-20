@@ -7,9 +7,8 @@ A unified NAO behaviour that demonstrates three core capabilities simultaneously
 
 ## Concept
 
-The robot behaves like a near-sighted dog that also wants to play soccer.  
-It always moves forward, always avoids obstacles, and always chases a red ball when it sees one.  
-A human can override with voice at any time — primarily as a safety fallback when the internal avoidance fails.
+The robot always moves forward, avoids obstacles autonomously via sonar, and chases a red ball when one is visible.  
+Voice commands exist purely as a human fallback — a way to stop or resume the robot if the internal avoidance ever fails or the operator needs to intervene.
 
 ---
 
@@ -36,8 +35,10 @@ Every 100 ms the movement loop evaluates in this order:
 5. CLEAR                    →  gentle alternating arc (direction flips after each Roomba turn)
 ```
 
-The sonar "bad eyesight" range means the robot only reacts to obstacles within ~1 m,
-so it wanders naturally until something is nearly in front of it — like a dog that can't see far.
+Obstacle avoidance and voice listening run as independent parallel threads. The movement thread
+continuously adjusts the arc path — preemptive curving begins at 0.80 m, well before a hard
+obstacle is reached. Voice is a separate channel that can interrupt at any point, but the robot
+does not depend on it to navigate safely.
 
 After a Roomba spin the arc direction flips, biasing the next run toward the side with more open space.
 
