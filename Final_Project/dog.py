@@ -1,20 +1,20 @@
 #!/Users/nicholascarducci/.pyenv/versions/2.7.18/bin/python2.7
 """
 NAO Soccer-Dog Brain
-One unified behaviour: forward drive + sonar obstacle avoidance + ball seeking.
+One unified behaviour: always moving forward, sonar steers, ball motivates.
 Voice commands are a human fallback only -- the robot handles navigation autonomously.
 
-Movement priority (highest to lowest):
-  1. DANGER sonar     -- stop, Roomba-spin until clear, resume
-  2. Ball visible     -- steer azimuth toward ball; kick at KICK_DIST
-                         (sonar danger still overrides mid-approach)
-  3. OBSTACLE sonar   -- hard curve + slow
-  4. WARN sonar       -- preemptive curve (blended strength)
-  5. CLEAR            -- gentle alternating arc
+The robot never stops to turn. Theta and speed are continuously modulated:
+  DANGER sonar   -- near-pivot, creeping forward
+  OBSTACLE sonar -- hard curve, slow
+  WARN sonar     -- blended preemptive curve
+  CLEAR          -- gentle alternating arc
+  Ball visible   -- azimuth steers theta; sonar overrides if obstacle on same side
+  Kick           -- only intentional stop, brief, then resumes
 
 Voice is a human safety override only:
-  "go" / "fetch"  -- resume after a stop command
-  "stop"          -- pause all motion (sonar danger resumes automatically)
+  "go" / "fetch"  -- resume after a manual stop
+  "stop"          -- pause all motion
 """
 import os
 import sys
@@ -34,8 +34,7 @@ ROBOT_PORT = 9559
 # ── Sonar thresholds (metres) ─────────────────────────────────────────────────
 WARN_DIST    = 0.80   # start preemptive curve
 OBS_DIST     = 0.55   # commit to hard curve + slow
-DANGER_DIST  = 0.32   # stop and spin (Roomba)
-CLEAR_DIST   = 1.00   # threshold to exit Roomba spin
+DANGER_DIST  = 0.32   # near-pivot: creep forward at max theta
 
 # ── Walking velocities (normalised 0-1) ───────────────────────────────────────
 WALK_VX    = 0.55   # forward speed in clear zone
@@ -56,7 +55,6 @@ POLL_SEC = 0.10
 # ── States ────────────────────────────────────────────────────────────────────
 S_STOPPED = "stopped"
 S_WALKING = "walking"
-S_TURNING = "turning"
 
 
 def _open_side(left_m, right_m):
@@ -194,6 +192,20 @@ class Brain(object):
     # ── Movement loop ─────────────────────────────────────────────────────────
 
     def _movement_loop(self):
+        """
+        Always moving forward. Sonar modulates theta and speed continuously —
+        no stopping, no spinning. The same steering logic scales from a gentle
+        arc in the clear zone all the way to a near-pivot at danger range.
+
+        After recovering from an obstacle zone, arc_sign flips so the robot
+        naturally biases toward the side it just opened up toward.
+
+        Ball seeking replaces the sonar arc when a ball is visible; sonar
+        avoidance still wins if an obstacle is on the same side as the ball.
+        Kick is the only intentional stop.
+        """
+        was_avoiding = False
+
         while self._running:
             if self._get_state() != S_WALKING:
                 time.sleep(POLL_SEC)
@@ -202,32 +214,12 @@ class Brain(object):
             left_m, right_m = self._read_sonar()
             min_dist = min(left_m, right_m)
 
-            # ── 1. DANGER: Roomba spin until clear ────────────────────────────
-            if min_dist < DANGER_DIST:
-                self.motion.stopMove()
-                self._set_state(S_TURNING)
-                spin_dir = _open_side(left_m, right_m)
-                self.motion.moveToward(0.0, 0.0, spin_dir * TURN_THETA)
-                self.tts.post.say("Obstacle!")
-
-                while self._running and self._get_state() == S_TURNING:
-                    l, r = self._read_sonar()
-                    if min(l, r) >= CLEAR_DIST:
-                        break
-                    time.sleep(POLL_SEC)
-
-                self._arc_sign = int(spin_dir)
-                self.motion.stopMove()
-                time.sleep(0.15)
-                self._set_state(S_WALKING)
-                continue
-
-            # ── 2. Ball visible: steer toward it ─────────────────────────────
+            # ── Ball visible: steer toward it ─────────────────────────────────
             ball = self._read_ball()
             if ball is not None:
                 azimuth, dist_m = ball
 
-                if dist_m < KICK_DIST:
+                if dist_m < KICK_DIST and min_dist >= OBS_DIST:
                     self.motion.stopMove()
                     self.tts.post.say("Kick!")
                     # TODO: replace with actual kick joint motion
@@ -236,21 +228,30 @@ class Brain(object):
                     self._set_state(S_WALKING)
                     continue
 
-                steer_theta = max(-TURN_THETA, min(TURN_THETA, azimuth * 1.5))
-                approach_speed = WALK_VX * min(1.0, dist_m / 0.5)
-                self.motion.moveToward(approach_speed, 0.0, steer_theta)
+                ball_theta = max(-TURN_THETA, min(TURN_THETA, azimuth * 1.5))
+                # if an obstacle is on the same side as the ball, sonar steers
+                theta = _open_side(left_m, right_m) * TURN_THETA if min_dist < OBS_DIST else ball_theta
+                self.motion.moveToward(WALK_VX * min(1.0, dist_m / 0.5), 0.0, theta)
                 time.sleep(POLL_SEC)
                 continue
 
-            # ── 3. OBSTACLE: hard curve + slow ────────────────────────────────
+            # ── Sonar-only steering: continuous theta/speed scale ─────────────
+            if min_dist < DANGER_DIST:
+                was_avoiding = True
+                steer = _open_side(left_m, right_m)
+                self.motion.moveToward(WALK_VX * 0.15, 0.0, steer * TURN_THETA)
+                time.sleep(POLL_SEC)
+                continue
+
             if min_dist < OBS_DIST:
+                was_avoiding = True
                 steer = _open_side(left_m, right_m)
                 self.motion.moveToward(WALK_VX * 0.35, 0.0, steer * TURN_THETA * 0.65)
                 time.sleep(POLL_SEC)
                 continue
 
-            # ── 4. WARN: preemptive blend curve ───────────────────────────────
             if min_dist < WARN_DIST:
+                was_avoiding = True
                 steer = _open_side(left_m, right_m)
                 blend = 1.0 - (min_dist - OBS_DIST) / (WARN_DIST - OBS_DIST)
                 self.motion.moveToward(
@@ -261,7 +262,10 @@ class Brain(object):
                 time.sleep(POLL_SEC)
                 continue
 
-            # ── 5. CLEAR: gentle alternating arc ──────────────────────────────
+            # ── Clear: gentle alternating arc ─────────────────────────────────
+            if was_avoiding:
+                self._arc_sign *= -1
+                was_avoiding = False
             self.motion.moveToward(WALK_VX, 0.0, ARC_THETA * self._arc_sign)
             time.sleep(POLL_SEC)
 

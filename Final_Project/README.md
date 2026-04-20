@@ -25,22 +25,21 @@ Voice commands exist purely as a human fallback — a way to stop or resume the 
 
 ## Behaviour Priority Stack
 
-Every 100 ms the movement loop evaluates in this order:
+Every 100 ms the movement loop evaluates in this order. The robot **never stops to turn** —
+theta and speed are continuously scaled by distance so avoidance is a smooth steering response
+from far out, not a reactive emergency stop.
 
 ```
-1. DANGER   sonar < 0.32 m  →  stop, Roomba-spin toward open side until clear, resume
-2. BALL     visible          →  steer azimuth toward ball; kick posture at 0.25 m
-3. OBSTACLE sonar < 0.55 m  →  hard curve toward open side + 35% speed
-4. WARN     sonar < 0.80 m  →  preemptive blend curve (sharpens as distance shrinks)
-5. CLEAR                    →  gentle alternating arc (direction flips after each Roomba turn)
+1. BALL     visible          →  azimuth steers theta; sonar overrides if obstacle on same side
+                                kick posture fires at 0.25 m (only intentional stop)
+2. DANGER   sonar < 0.32 m  →  near-pivot: max theta toward open side, 15% forward speed
+3. OBSTACLE sonar < 0.55 m  →  hard curve toward open side, 35% forward speed
+4. WARN     sonar < 0.80 m  →  blended curve — sharpens and slows as distance shrinks
+5. CLEAR                    →  gentle alternating arc; direction flips after each obstacle recovery
 ```
 
-Obstacle avoidance and voice listening run as independent parallel threads. The movement thread
-continuously adjusts the arc path — preemptive curving begins at 0.80 m, well before a hard
-obstacle is reached. Voice is a separate channel that can interrupt at any point, but the robot
-does not depend on it to navigate safely.
-
-After a Roomba spin the arc direction flips, biasing the next run toward the side with more open space.
+Obstacle avoidance and voice listening run as independent parallel threads. Voice is a separate
+channel that can interrupt at any point, but the robot does not depend on it to navigate safely.
 
 ---
 
@@ -79,8 +78,7 @@ ROBOT_PORT = 9559
 |---|---|---|
 | `WARN_DIST` | 0.80 m | Begin preemptive curve |
 | `OBS_DIST` | 0.55 m | Hard curve + slow |
-| `DANGER_DIST` | 0.32 m | Stop and spin |
-| `CLEAR_DIST` | 1.00 m | Exit spin threshold |
+| `DANGER_DIST` | 0.32 m | Near-pivot: max theta, 15% forward speed |
 | `WALK_VX` | 0.55 | Forward speed (0–1) |
 | `ARC_THETA` | 0.12 | Gentle arc magnitude |
 | `TURN_THETA` | 0.75 | Spin / hard-curve rate |
