@@ -19,7 +19,7 @@ except ImportError as e:
     sys.exit(1)
 
 
-ROBOT_IP = "172.16.0.29"
+ROBOT_IP = "172.16.0.6"
 ROBOT_PORT = 9559
 
 motion = None

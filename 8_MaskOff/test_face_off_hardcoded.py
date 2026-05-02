@@ -44,6 +44,16 @@ class TestFaceOffHardcoded(unittest.TestCase):
         face_off_hardcoded.turn_toward_sound()
         self.motion.setAngles.assert_called_with(["HeadYaw", "HeadPitch"], [0.5, -0.1], 0.3)
 
+    def test_clear_learned_faces_falls_back_to_forget_person(self):
+        self.face_proxy.forgetAllFaces.side_effect = RuntimeError("Can't find method: forgetAllFaces")
+        self.face_proxy.getLearnedFacesList.return_value = ["Bob", "Larry"]
+
+        face_off_hardcoded.clear_learned_faces()
+
+        self.face_proxy.getLearnedFacesList.assert_called_once_with()
+        self.face_proxy.forgetPerson.assert_any_call("Bob")
+        self.face_proxy.forgetPerson.assert_any_call("Larry")
+
     def test_main_learning_and_greeting(self):
         # Patch face_proxy.learnFace to succeed
         self.face_proxy.learnFace.side_effect = [True, True]

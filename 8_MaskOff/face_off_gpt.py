@@ -1,9 +1,12 @@
 #!/Users/nicholascarducci/.pyenv/versions/2.7.18/bin/python2.7
 # -*- coding: utf-8 -*-
-# Minimal hardcoded face learning and greeting: only Bob and Larry.
+# Face learning and greeting with ChatGPT-generated greetings.
 import os
 import sys
 import time
+import json
+import requests
+from dotenv import load_dotenv
 
 sdk_folder = "/Users/nicholascarducci/Desktop/naoqi-sqk/lib/python2.7/site-packages"
 sys.path.append(sdk_folder)
@@ -18,8 +21,17 @@ except ImportError as e:
     print("Error details: " + str(e))
     sys.exit(1)
 
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+if not OPENAI_API_KEY:
+    print("ERROR: OPENAI_API_KEY not found.")
+    print("Make sure your .env file exists and contains OPENAI_API_KEY=your_key_here")
+    sys.exit(1)
+
 ROBOT_IP = "172.16.0.6"
 ROBOT_PORT = 9559
+OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 POLL_INTERVAL = 0.2
 GREETING_COOLDOWN_SECONDS = 10.0
 LEARNED_FACE_NAMES = ["Bob", "Larry"]
@@ -39,6 +51,49 @@ print("Running. Press a foot bumper or Ctrl+C to stop.")
 
 def say(text):
     tts.say(str(text))
+
+def get_chatgpt_greeting(name):
+    try:
+        print("Asking ChatGPT for a greeting for " + name + "...")
+        body = {
+            "model": "gpt-3.5-turbo",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a friendly robot named NAO. "
+                        "Generate short, warm, creative greetings for people. "
+                        "Keep responses to one or two sentences. "
+                        "Do not use any special characters or emoji."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": "Generate a greeting for a person named " + name + "."
+                }
+            ],
+            "max_tokens": 60
+        }
+        response = requests.post(
+            OPENAI_URL,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + OPENAI_API_KEY
+            },
+            data=json.dumps(body),
+            timeout=10
+        )
+        result = response.json()
+        if "choices" not in result:
+            print("Unexpected API response: " + str(result))
+            raise KeyError("choices")
+        greeting = result["choices"][0]["message"]["content"]
+        greeting = greeting.strip().encode("ascii", "ignore")
+        print("ChatGPT says: " + greeting)
+        return greeting
+    except Exception as e:
+        print("ChatGPT API error: " + str(e))
+        return ("Hello, " + name + "! Great to see you.").encode("ascii", "ignore")
 
 def bumper_pressed():
     try:
@@ -117,11 +172,15 @@ def main():
             except RuntimeError:
                 face_data = []
             names = get_recognized_faces(face_data)
+            if names:
+                print("Detected faces: " + str(names))
+            elif face_data:
+                print("Face data present but no recognized names: " + str(face_data))
             for name in names:
                 if name in LEARNED_FACE_NAMES:
                     time_since_last = time.time() - last_greeted_time
                     if name != last_greeted or time_since_last > GREETING_COOLDOWN_SECONDS:
-                        say("Hello, " + name + "!")
+                        say(get_chatgpt_greeting(name))
                         last_greeted = name
                         last_greeted_time = time.time()
             if not names:

@@ -1,94 +1,137 @@
-# NAO Soccer-Dog Demo
+# NAO 1v1 Soccer
 
-A unified NAO behaviour that demonstrates three core capabilities simultaneously:
-**voice recognition**, **object detection**, and **locomotion with dynamic arc correction**.
-
----
-
-## Concept
-
-The robot always moves forward, avoids obstacles autonomously via sonar, and chases a red ball when one is visible.  
-Voice commands exist purely as a human fallback — a way to stop or resume the robot if the internal avoidance ever fails or the operator needs to intervene.
+Two NAO robots compete for a red ball in a field with two neon-yellow goals. Vision-based opponent detection, ball velocity tracking, and strategic positioning determine play.
 
 ---
 
-## Capabilities Demonstrated
+## Hardware Setup
 
-| Capability | Mechanism |
-|---|---|
-| Voice recognition | `ALSpeechRecognition` — 3-word vocabulary, confidence-gated |
-| Object / obstacle detection | `ALSonar` — two ultrasonic sensors, ~0–1 m range |
-| Ball detection | `ALRedBallDetection` — camera-based, gives azimuth + distance |
-| Locomotion | `ALMotion.moveToward` — continuous velocity with live theta steering |
+| Component   | Specs                                                                    |
+| ----------- | ------------------------------------------------------------------------ |
+| **Robots**  | NAO v6 (white body, dark grey joints)                                    |
+| **Ball**    | Red rubber, ~1 ft diameter (CVS Sport Design)                            |
+| **Goals**   | Neon yellow half-circle rims (Athletic Works, Walmart) w/ black net band |
+| **Field**   | 15–20 ft long, bounded by desks or walls                                 |
+| **Cameras** | NAO top camera (640×480, ~61° FOV)                                       |
 
 ---
 
-## Behaviour Priority Stack
+## Vision Detection
 
-Every 100 ms the movement loop evaluates in this order. The robot **never stops to turn** —
-theta and speed are continuously scaled by distance so avoidance is a smooth steering response
-from far out, not a reactive emergency stop.
+| Object           | Method                                    | Threshold                                    |
+| ---------------- | ----------------------------------------- | -------------------------------------------- |
+| **Opponent NAO** | White blob detection (HSV)                | H: 0–180°, S: 0–50, V: 180–255               |
+| **Goal rims**    | Neon yellow blob detection                | H: 40–70°, S: 100–255, V: 100–255            |
+| **Red ball**     | Red blob detection + `ALRedBallDetection` | H: 0–10° or 170–180°, S: 100–255, V: 100–255 |
+
+Opponent **distance estimation** uses known NAO 6 height (573 mm) and blob bounding-box height:
 
 ```
-1. BALL     visible          →  azimuth steers theta; sonar overrides if obstacle on same side
-                                kick posture fires at 0.25 m (only intentional stop)
-2. DANGER   sonar < 0.32 m  →  near-pivot: max theta toward open side, 15% forward speed
-3. OBSTACLE sonar < 0.55 m  →  hard curve toward open side, 35% forward speed
-4. WARN     sonar < 0.80 m  →  blended curve — sharpens and slows as distance shrinks
-5. CLEAR                    →  gentle alternating arc; direction flips after each obstacle recovery
+distance_m = (NAO_HEIGHT * focal_length_px) / blob_height_pixels
 ```
 
-Obstacle avoidance and voice listening run as independent parallel threads. Voice is a separate
-channel that can interrupt at any point, but the robot does not depend on it to navigate safely.
+Opponent **azimuth** is calculated from blob x-position in image space.
+
+---
+
+## Game Flow
+
+### **Phase 1: Init** (`_calibrate_goals`)
+
+- Robot scans field, detects both neon-yellow goal rims
+- Records goal positions (left, right)
+- Blocks until both goals locked
+
+### **Phase 2: Lineup** (`_lineup`)
+
+- Robot walks to center field at slow speed (10% fwd)
+- Waits for human "go" command via voice recognition
+- Listener thread monitors for `"go"` / `"fetch"` → enters PLAYING
+
+### **Phase 3: Play** (`_movement_loop`)
+
+- Two-layer control: strategy + sonar safety
+
+**Strategy layer** (every 100 ms):
+
+1. **Ball moving?** (distance delta >5cm/frame)
+   - YES → **INTERCEPT** mode: run to predicted ball trajectory (both robots race)
+   - NO → check distance to opponent
+
+2. **Opponent closer to ball?** (opp_dist < ball_dist + 0.3 m)
+   - YES → **STALK** mode: face opponent, slow forward (20%), ready to block
+   - NO → **CHARGE** mode: pursue ball at full speed (55%)
+
+3. **Ball within KICK range?** (<0.25 m)
+   - YES → **KICK** mode: stop, posture, resume
+
+4. **No ball visible?**
+   - SEARCH: pivot in place, owl-style sweep (no forward movement, just rotate)
+
+**Sonar safety layer** (always active, overrides strategy):
+
+- DANGER (<0.32 m) → hard pivot + creep forward (15% speed)
+- OBSTACLE (0.32–0.55 m) → curve hard, slow (35% speed)
+- WARN (0.55–0.80 m) → blended curve, blended speed
+- CLEAR (>0.80 m) → gentle wandering arc + strategy azimuth
 
 ---
 
 ## Voice Commands
 
-| Word | Effect |
-|---|---|
-| `go` / `fetch` | Resume movement after a manual stop |
-| `stop` | Pause all motion (sonar danger still auto-resumes the spin) |
+| Command            | Effect                                                    |
+| ------------------ | --------------------------------------------------------- |
+| `"go"` / `"fetch"` | Exit LINEUP, enter PLAYING                                |
+| `"stop"`           | Pause motion (sonar danger still auto-resumes for safety) |
 
 ---
 
-## Setup
+## Key Constants (Tunable)
 
-**Requirements**
-- NAO robot on the local network
-- Python 2.7 with the NAOqi Python SDK (`naoqi-sqk`)
-- Paths in `dog.py` assume the SDK at `~/Desktop/naoqi-sqk`
+| Parameter               | Value  | Meaning                                |
+| ----------------------- | ------ | -------------------------------------- |
+| `WALK_VX`               | 0.55   | Charge/search forward speed (norm 0–1) |
+| `WARN_DIST`             | 0.80 m | Start preemptive curve                 |
+| `OBS_DIST`              | 0.55 m | Hard curve threshold                   |
+| `DANGER_DIST`           | 0.32 m | Pivot threshold                        |
+| `KICK_DIST`             | 0.25 m | Ball range for kick posture            |
+| `BALL_MOTION_THRESHOLD` | 0.05 m | Distance delta to detect motion        |
 
-**Run**
-```bash
-/Users/nicholascarducci/.pyenv/versions/2.7.18/bin/python2.7 dog.py
+---
+
+## Ball Motion Detection
+
+Ball velocity is estimated by comparing azimuth and distance across frames:
+
+- If distance delta >5 cm/frame: ball is moving
+- Velocity = (delta_azimuth, delta_distance)
+- Predicted intercept azimuth = current_azi + velocity_azi × 0.5
+
+---
+
+## Startup Sequence
+
+```
+1. NAO wakes, initializes proxies (motion, sonar, camera, ASR, ball detection)
+2. Sonar and camera spin up
+3. ASR subscribes to vocabulary: ["go", "stop", "fetch"]
+4. Vision thread starts scanning for goals
+5. Goal calibration blocks until both yellow rims locked
+6. Robot walks to center at slow speed
+7. Waits for human "go" command
+8. On "go": enters PLAYING state
+9. Movement loop runs: detect opponent/ball, decide strategy, execute via moveToward
+10. Sonar safety layer always active, overriding strategy if collision risk
+11. Say "stop" to pause; say "go" to resume
+12. Ctrl-C to shutdown gracefully
 ```
 
-Robot IP and port are set at the top of `dog.py`:
-```python
-ROBOT_IP   = "172.16.0.29"
-ROBOT_PORT = 9559
-```
-
 ---
 
-## Tuning Constants
+## Future Refinements
 
-| Constant | Default | Meaning |
-|---|---|---|
-| `WARN_DIST` | 0.80 m | Begin preemptive curve |
-| `OBS_DIST` | 0.55 m | Hard curve + slow |
-| `DANGER_DIST` | 0.32 m | Near-pivot: max theta, 15% forward speed |
-| `WALK_VX` | 0.55 | Forward speed (0–1) |
-| `ARC_THETA` | 0.12 | Gentle arc magnitude |
-| `TURN_THETA` | 0.75 | Spin / hard-curve rate |
-| `KICK_DIST` | 0.25 m | Ball distance to trigger kick |
-| `VOICE_CONFIDENCE` | 0.38 | Minimum ASR confidence |
-
----
-
-## Planned: Opponent Responses
-
-Next layer inserts between priority 2 (ball) and priority 3 (obstacle):
-- Detect opponent (person / second robot) via face detection or landmark
-- Decide: intercept path, shield ball, retreat
+- **Perpendicular defensive positioning**: Use goal positions to calculate optimal blocking point on the opponent→goal line
+- **Goal-aware kicking**: Direct kicks toward detected goal position, not just raw ball location
+- **2v2 team detection**: Distinguish teammate from opponent via color markers or team assignments
+- **Odometry-based positioning**: Track own position via wheel encoders for field-relative strategy
+- **Opponent prediction**: Estimate opponent's next move based on their heading and ball position
