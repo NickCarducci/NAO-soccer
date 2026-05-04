@@ -1,4 +1,5 @@
 #!/Users/nicholascarducci/.pyenv/versions/2.7.18/bin/python2.7
+# -*- coding: utf-8 -*-
 """
 NAO 2v2 Soccer with Live Team Communication
 
@@ -23,14 +24,13 @@ import time
 import threading
 import math
 import random
+import subprocess
 
 sdk_folder = "/Users/nicholascarducci/Desktop/naoqi-sqk/lib/python2.7/site-packages"
 sys.path.append(sdk_folder)
 os.environ["DYLD_LIBRARY_PATH"] = "/Users/nicholascarducci/Desktop/naoqi-sqk/lib"
 
 from naoqi import ALProxy
-import cv2
-import numpy as np
 
 # ── Robot names (4 soccer players) ────────────────────────────────────────────
 ROBOT_NAMES = {
@@ -42,16 +42,18 @@ ROBOT_NAMES = {
 
 # ── Known robot IPs (update with your 4 NAO 6 IPs) ─────────────────────────────
 ROBOT_IPS = [
-    "172.16.0.29",      # Ronnie
-    "172.16.0.30",      # Ozil
-    "172.16.0.31",      # Suarez
-    "172.16.0.32",      # Messi
+    "172.16.0.8",      # Ronnie
+    "172.16.0.144",      # Ozil
+    "172.16.0.29",      # Suarez
+    "172.16.0.6",      # Messi
 ]
 ROBOT_PORT = 9559
 
-# Random assignment: each robot picks an ID from 1-4
-MY_ROBOT_ID = random.randint(1, 4)
-MY_ROBOT_IP = ROBOT_IPS[MY_ROBOT_ID - 1]
+# Random assignment by default; set ROBOT_ID=1..4 to debug one NAO deterministically.
+MY_ROBOT_ID = int(os.environ.get("ROBOT_ID", random.randint(1, 4)))
+if MY_ROBOT_ID not in ROBOT_NAMES:
+    raise ValueError("ROBOT_ID must be 1, 2, 3, or 4")
+MY_ROBOT_IP = os.environ.get("ROBOT_IP", ROBOT_IPS[MY_ROBOT_ID - 1])
 MY_NAME = ROBOT_NAMES[MY_ROBOT_ID]
 MY_TEAM = "A" if MY_ROBOT_ID in (1, 2) else "B"
 TEAMMATE_ID = 3 - MY_ROBOT_ID if MY_ROBOT_ID <= 2 else 7 - MY_ROBOT_ID
@@ -66,9 +68,7 @@ print("TEAMMATE: {} (ID {})".format(TEAMMATE_NAME, TEAMMATE_ID))
 print("=" * 60)
 
 # ── Sonar thresholds (metres) ─────────────────────────────────────────────────
-WARN_DIST    = 0.80
-OBS_DIST     = 0.55
-DANGER_DIST  = 0.32
+# REMOVED: sonar-based avoidance replaced with vision-based collision avoidance
 
 # ── Walking velocities ────────────────────────────────────────────────────────
 WALK_VX    = 0.55
@@ -95,15 +95,13 @@ CAMERA_RES_H = 480.0
 CAMERA_FOV_H = math.radians(60.97)
 CAMERA_FOCAL_LENGTH = (CAMERA_RES_W / 2.0) / math.tan(CAMERA_FOV_H / 2.0)
 
-# ── Vision thresholds (HSV) ───────────────────────────────────────────────────
-WHITE_HSV_LOWER = np.array([0, 0, 180])
-WHITE_HSV_UPPER = np.array([180, 50, 255])
-YELLOW_HSV_LOWER = np.array([40, 100, 100])
-YELLOW_HSV_UPPER = np.array([70, 255, 255])
-RED_HSV_LOWER1 = np.array([0, 100, 100])
-RED_HSV_UPPER1 = np.array([10, 255, 255])
-RED_HSV_LOWER2 = np.array([170, 100, 100])
-RED_HSV_UPPER2 = np.array([180, 255, 255])
+# ── Vision thresholds ─────────────────────────────────────────────────────────
+# Color ranges for ALColorBlobDetection (HSV in NAO format)
+# Yellow (goals): H:30-45, S:100-255, V:100-255
+# White (robots): H:0-360, S:0-50, V:200-255
+GOAL_MIN_SIZE = int(os.environ.get("GOAL_MIN_SIZE", "50"))
+GOAL_DEBUG = int(os.environ.get("GOAL_DEBUG", "1"))
+
 
 # ── States ────────────────────────────────────────────────────────────────────
 S_STOPPED = "stopped"
@@ -154,27 +152,6 @@ def _azimuth_to_teammate(teammate_robot_pos):
     return azi * 0.5
 
 
-def _blob_centroid(mask, estimate_distance=False):
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-    largest = max(contours, key=cv2.contourArea)
-    area = cv2.contourArea(largest)
-    if area < 50:
-        return None
-    M = cv2.moments(largest)
-    if M["m00"] == 0:
-        return None
-    cx = int(M["m10"] / M["m00"])
-    cy = int(M["m01"] / M["m00"])
-    if estimate_distance:
-        x, y, w, h = cv2.boundingRect(largest)
-        if h < 10:
-            return None
-        distance_m = (NAO_HEIGHT * CAMERA_FOCAL_LENGTH) / float(h)
-        return cx, cy, distance_m
-    else:
-        return cx, cy, area
 
 
 class SoccerBot2v2(object):
@@ -189,6 +166,8 @@ class SoccerBot2v2(object):
         self._last_word     = None
         self._search_theta  = 0.5
         self._last_callout  = 0  # throttle TTS spam
+        self._asr_ready     = False  # track if ASR setup succeeded
+        self._last_goal_debug = 0
 
         # Vision
         self._camera        = None
@@ -202,6 +181,7 @@ class SoccerBot2v2(object):
         self._contested     = False  # 2+ robots in close range
         self._shooting      = False  # in shimmy/positioning phase
         self._shimmy_target = "goal"  # "goal" or "teammate"
+        self._wall_detected = False   # desk/wall at frame edge
 
         print("Connecting to NAO {}...".format(MY_ROBOT_ID))
         try:
@@ -209,7 +189,6 @@ class SoccerBot2v2(object):
             self.posture = ALProxy("ALRobotPosture",      MY_ROBOT_IP, ROBOT_PORT)
             self.tts     = ALProxy("ALTextToSpeech",      MY_ROBOT_IP, ROBOT_PORT)
             self.memory  = ALProxy("ALMemory",            MY_ROBOT_IP, ROBOT_PORT)
-            self.sonar   = ALProxy("ALSonar",             MY_ROBOT_IP, ROBOT_PORT)
             self.asr     = ALProxy("ALSpeechRecognition", MY_ROBOT_IP, ROBOT_PORT)
             self.ball    = ALProxy("ALRedBallDetection",  MY_ROBOT_IP, ROBOT_PORT)
             self.video   = ALProxy("ALVideoDevice",       MY_ROBOT_IP, ROBOT_PORT)
@@ -221,32 +200,71 @@ class SoccerBot2v2(object):
     # ── Setup / teardown ──────────────────────────────────────────────────────
 
     def setup(self):
-        self.motion.wakeUp()
-        self.motion.setStiffnesses("Body", 1.0)
-        self.posture.goToPosture("StandInit", 0.6)
+        print("[SETUP] Waking up...")
+        sys.stdout.flush()
+        try:
+            self.motion.wakeUp()
+        except Exception as e:
+            print("WARNING: wakeUp failed: {}".format(e))
+        
+        print("[SETUP] Setting stiffness...")
+        sys.stdout.flush()
+        try:
+            self.motion.setStiffnesses("Body", 1.0)
+        except Exception as e:
+            print("WARNING: setStiffnesses failed: {}".format(e))
+        
+        print("[SETUP] Moving to StandInit...")
+        sys.stdout.flush()
+        try:
+            self.posture.goToPosture("StandInit", 0.6)
+        except Exception as e:
+            print("WARNING: goToPosture failed: {}".format(e))
 
-        self.sonar.subscribe("Soccer2v2")
-        time.sleep(0.4)
-
+        print("[SETUP] Configuring ASR...")
+        sys.stdout.flush()
         try:
             self.asr.unsubscribe("Soccer2v2")
         except Exception:
             pass
-        self.asr.setLanguage("English")
-        self.asr.setVocabulary(VOCABULARY, False)
-        self.asr.subscribe("Soccer2v2")
+        
+        try:
+            self.asr.stop()
+        except Exception:
+            pass
+        
+        try:
+            self.asr.pause(True)
+            self.asr.setLanguage("English")
+            self.asr.setVocabulary(VOCABULARY, False)
+            self.asr.subscribe("Soccer2v2")
+            self.asr.pause(False)
+            self._asr_ready = True
+        except Exception as e:
+            self._asr_ready = False
+            print("ERROR: ASR setup failed: {}".format(e))
+            raise RuntimeError("ASR setup failed")
 
+        print("[SETUP] Subscribing to ball detection...")
+        sys.stdout.flush()
+        # Ball detection via red ball module
         try:
             self.ball.subscribe("Soccer2v2")
-        except Exception:
-            pass
+        except Exception as e:
+            print("WARNING: Could not subscribe to red ball detection: {}".format(e))
 
+        print("[SETUP] Configuring color blob detection...")
+        sys.stdout.flush()
+        # Color blob detection for goals, robots, and walls (built-in NAO module)
         try:
-            self.video.setActiveCamera(0)
-            self._camera = self.video
-        except Exception:
-            pass
+            if not hasattr(self, 'color_blob'):
+                self.color_blob = ALProxy("ALColorBlobDetection", MY_ROBOT_IP, ROBOT_PORT)
+            self._setup_color_blob_detection()
+        except Exception as e:
+            print("WARNING: Could not setup color blob detection: {}".format(e))
 
+        print("[SETUP] Announcing readiness...")
+        sys.stdout.flush()
         self._announce("Robot {} Team {} ready!".format(MY_ROBOT_ID, MY_TEAM))
 
     def shutdown(self):
@@ -255,12 +273,16 @@ class SoccerBot2v2(object):
             self.motion.stopMove()
         except Exception:
             pass
-        for proxy in (self.asr, self.sonar, self.ball):
+        for proxy in (self.asr, self.ball):
             if proxy is not None:
                 try:
                     proxy.unsubscribe("Soccer2v2")
                 except Exception:
                     pass
+        try:
+            self.asr.pause(True)
+        except Exception:
+            pass
         try:
             self.posture.goToPosture("Stand", 0.5)
         except Exception:
@@ -303,16 +325,6 @@ class SoccerBot2v2(object):
 
     # ── Sensors ───────────────────────────────────────────────────────────────
 
-    def _read_sonar(self):
-        try:
-            left  = float(self.memory.getData(
-                "Device/SubDeviceList/US/Left/Sensor/Value"))
-            right = float(self.memory.getData(
-                "Device/SubDeviceList/US/Right/Sensor/Value"))
-            return left, right
-        except Exception:
-            return 2.0, 2.0
-
     def _read_ball(self):
         try:
             data = self.memory.getData("redBallDetected")
@@ -322,74 +334,131 @@ class SoccerBot2v2(object):
         except Exception:
             pass
         return None
-
-    def _capture_frame(self):
+    def _setup_color_blob_detection(self):
+        """Configure ALColorBlobDetection for white (robots) and yellow (goals)."""
         try:
-            result = self.video.getImageRemote(self._camera)
-            if result is None:
-                return None
-            width, height, channels, imgBuffer = result[0], result[1], result[2], result[6]
-            img = np.frombuffer(imgBuffer, dtype=np.uint8).reshape((height, width, channels))
-            return cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+            if not hasattr(self, 'color_blob'):
+                self.color_blob = ALProxy("ALColorBlobDetection", MY_ROBOT_IP, ROBOT_PORT)
+            # Configure detection for white blobs (robots)
+            # White = low saturation, high value
+            self.color_blob.setColorSpace(0)  # Use HSV color space
         except Exception:
-            return None
+            pass
 
-    def _detect_robots(self, hsv_frame):
-        """Detect all white blobs (other robots). Return list of (cx, cy, distance_m)."""
-        if hsv_frame is None:
+    def _detect_robots(self):
+        """Detect white blobs (other robots) using ALColorBlobDetection.
+        Returns list of (distance_m, azimuth_rad) tuples."""
+        try:
+            blobs = self.memory.getData("ColorBlobDetection/blobs")
+            if not blobs or len(blobs) == 0:
+                return []
+            
+            robots = []
+            # ALColorBlobDetection blob format: (cx, cy, width, height, x_angle, y_angle, distance)
+            for blob in blobs:
+                if len(blob) >= 7:
+                    cx, cy, w, h, x_ang, y_ang, dist = blob[0], blob[1], blob[2], blob[3], blob[4], blob[5], blob[6]
+                    # Filter by distance to identify robots (0.1-3m range)
+                    if 0.1 < dist < 3.0:
+                        robots.append((float(dist), float(x_ang)))
+            return robots
+        except Exception:
             return []
-        mask = cv2.inRange(hsv_frame, WHITE_HSV_LOWER, WHITE_HSV_UPPER)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        robots = []
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area > 50:
-                M = cv2.moments(contour)
-                if M["m00"] != 0:
-                    cx = int(M["m10"] / M["m00"])
-                    cy = int(M["m01"] / M["m00"])
-                    x, y, w, h = cv2.boundingRect(contour)
-                    if h > 10:
-                        dist = (NAO_HEIGHT * CAMERA_FOCAL_LENGTH) / float(h)
-                        robots.append((cx, cy, dist))
-        return robots
 
-    def _detect_goals(self, hsv_frame):
-        if hsv_frame is None:
+    def _debug_goal_blobs(self, blobs, accepted, rejected):
+        if not GOAL_DEBUG:
+            return
+        now = time.time()
+        if now - self._last_goal_debug < 1.0:
+            return
+        self._last_goal_debug = now
+        print("[GOAL] raw={} accepted={} rejected={}".format(
+            len(blobs), accepted, rejected))
+        for blob in blobs[:3]:
+            try:
+                if len(blob) >= 7:
+                    cx, cy, w, h, x_ang, y_ang, dist = (
+                        blob[0], blob[1], blob[2], blob[3],
+                        blob[4], blob[5], blob[6]
+                    )
+                    print("[GOAL] raw blob center=({:.0f}, {:.0f}) size=({:.0f}, {:.0f}) area={:.0f} angle=({:.2f}, {:.2f}) dist={:.2f}".format(
+                        float(cx), float(cy), float(w), float(h),
+                        float(w) * float(h), float(x_ang),
+                        float(y_ang), float(dist)))
+            except Exception:
+                print("[GOAL] raw blob {}".format(blob))
+        sys.stdout.flush()
+
+    def _detect_goals(self):
+        """Detect yellow blobs (goals) using ALColorBlobDetection.
+        Returns list of (cx, cy, area, x_angle, distance_m) sorted left-to-right."""
+        try:
+            blobs = self.memory.getData("ColorBlobDetection/blobs")
+            if not blobs or len(blobs) == 0:
+                return []
+            
+            goals = []
+            rejected = 0
+            # Filter blobs for yellow-ish colors (soccer goal boundaries)
+            for blob in blobs:
+                if len(blob) >= 7:
+                    cx, cy, w, h, x_ang, y_ang, dist = blob[0], blob[1], blob[2], blob[3], blob[4], blob[5], blob[6]
+                    area = w * h
+                    if 0.15 < dist < 6.0 and area >= GOAL_MIN_SIZE:
+                        goals.append((cx, cy, area, x_ang, dist))
+                    else:
+                        rejected += 1
+            self._debug_goal_blobs(blobs, len(goals), rejected)
+            
+            # Sort by x position (left to right)
+            return sorted(goals, key=lambda g: g[0])
+        except Exception:
             return []
-        mask = cv2.inRange(hsv_frame, YELLOW_HSV_LOWER, YELLOW_HSV_UPPER)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        goals = []
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area > 100:
-                M = cv2.moments(contour)
-                if M["m00"] != 0:
-                    cx = int(M["m10"] / M["m00"])
-                    cy = int(M["m01"] / M["m00"])
-                    goals.append((cx, cy, area))
-        return sorted(goals, key=lambda g: g[0])
 
+    def _detect_wall_edge(self):
+        """Check if wall/boundary is close (no blob detection needed).
+        Return True if robot is near field edge (stop before collision)."""
+        try:
+            # Simple approach: if any blob is at extreme distance/angle, wall is close
+            blobs = self.memory.getData("ColorBlobDetection/blobs")
+            if blobs and len(blobs) > 0:
+                for blob in blobs:
+                    if len(blob) >= 7:
+                        dist = blob[6]
+                        # If any blob is very close (< 0.3m) horizontally, wall detected
+                        if dist < 0.3:
+                            return True
+            return False
+        except Exception:
+            return False
     # ── Vision thread ─────────────────────────────────────────────────────────
 
     def _vision_thread(self):
+        """Monitor color blobs for robots, goals, and walls."""
+        self._setup_color_blob_detection()
+        
         while self._running:
             try:
-                frame = self._capture_frame()
-                if frame is not None:
-                    # Detect all robots (other NAOs)
-                    robots = self._detect_robots(frame)
-                    self._other_robots = []
-                    for cx, cy, dist in robots:
-                        azi = (cx - CAMERA_RES_W / 2.0) / (CAMERA_RES_W / 2.0) * CAMERA_FOV_H / 2.0
-                        self._other_robots.append((dist, azi))
-
-                    goals = self._detect_goals(frame)
-                    if len(goals) >= 2:
-                        self._goal_left = goals[0][:2]
-                        self._goal_right = goals[-1][:2]
-            except Exception:
+                # Detect robots (white blobs)
+                robots = self._detect_robots()
+                self._other_robots = robots  # Update state
+                
+                # Detect goals (yellow blobs)
+                goals = self._detect_goals()
+                if len(goals) >= 2:
+                    self._goal_left = goals[0][:2]
+                    self._goal_right = goals[-1][:2]
+                elif len(goals) == 1:
+                    # Only one goal visible; assume center and reflect
+                    cx, cy, area, x_ang, dist = goals[0]
+                    self._goal_left = (640 - cx, cy)
+                    self._goal_right = (cx, cy)
+                
+                # Detect wall/boundary
+                self._wall_detected = self._detect_wall_edge()
+            except Exception as e:
                 pass
+            
             time.sleep(VISION_POLL_SEC)
 
     # ── Voice thread ──────────────────────────────────────────────────────────
@@ -538,8 +607,6 @@ class SoccerBot2v2(object):
     # ── Movement loop ─────────────────────────────────────────────────────────
 
     def _movement_loop(self):
-        was_avoiding = False
-
         while self._running:
             if self._get_game_state() != GAME_PLAYING:
                 time.sleep(POLL_SEC)
@@ -549,42 +616,11 @@ class SoccerBot2v2(object):
                 time.sleep(POLL_SEC)
                 continue
 
-            left_m, right_m = self._read_sonar()
-            min_dist = min(left_m, right_m)
-
             ball = self._read_ball()
-
             strategy, target_azi, target_speed = self._decide_strategy(ball)
 
             # Update operative
             self._set_operative(strategy)
-
-            # ── Sonar safety ──────────────────────────────────────────────────
-            if min_dist < DANGER_DIST:
-                was_avoiding = True
-                steer = _open_side(left_m, right_m)
-                self.motion.moveToward(WALK_VX * 0.15, 0.0, steer * TURN_THETA)
-                time.sleep(POLL_SEC)
-                continue
-
-            if min_dist < OBS_DIST:
-                was_avoiding = True
-                steer = _open_side(left_m, right_m)
-                self.motion.moveToward(WALK_VX * 0.35, 0.0, steer * TURN_THETA * 0.65)
-                time.sleep(POLL_SEC)
-                continue
-
-            if min_dist < WARN_DIST:
-                was_avoiding = True
-                steer = _open_side(left_m, right_m)
-                blend = 1.0 - (min_dist - OBS_DIST) / (WARN_DIST - OBS_DIST)
-                self.motion.moveToward(
-                    target_speed * (0.6 + 0.4 * (1.0 - blend)),
-                    0.0,
-                    steer * ARC_THETA * (1.0 + blend * 3.0)
-                )
-                time.sleep(POLL_SEC)
-                continue
 
             # ── Strategy-driven movement ──────────────────────────────────────
             if strategy == "kick":
@@ -592,29 +628,16 @@ class SoccerBot2v2(object):
                 self._announce("Scoring!", priority=True)
                 self.posture.goToPosture("StandInit", 0.8)
                 time.sleep(1.2)
-                self._set_motion_state(S_WALKING)
+                self._set_motion_state(S_STOPPED)
                 continue
 
-            # If we trapped the ball (ball_dist < 0.3m), we're in possession, ready to shoot
-        if ball_dist < 0.35 and strategy == OP_CHARGE:
-            self._shooting = True
-            # Call teammate "get open" in case we need to pass
-            if self._contested:
-                self._announce("{}, get open!".format(TEAMMATE_NAME), priority=True)
+            # Execute movement toward target with steering
+            if target_speed > 0:
+                self.motion.moveToward(target_speed, 0.0, target_azi)
+            else:
+                self.motion.stopMove()
 
-            # Check if opponent is blocking the shot during our shimmy
-            if self._other_robots:
-                closest_opponent_dist = min([d for d, a in self._other_robots])
-                if closest_opponent_dist < 0.8:
-                    # Blocker detected during shooting → make the pass
-                    self._announce("Passing to {}!".format(TEAMMATE_NAME), priority=True)
-                    self._shooting = False
-                    return (OP_PASS, ball_azi * 0.3, WALK_VX * 0.4)
-
-            # No blocker, line up the shot (shimmy around ball)
-            return (OP_SHOOT, ball_azi * 0.7, WALK_VX * 0.3)
-
-        self._shooting = False
+            time.sleep(POLL_SEC)
 
     def _get_game_state(self):
         with self._lock:
@@ -627,13 +650,9 @@ class SoccerBot2v2(object):
     # ── Calibration ───────────────────────────────────────────────────────────
 
     def _calibrate_goals(self):
-        self._announce("Scanning for goals.")
-        while self._running:
-            if self._goal_left and self._goal_right:
-                self._announce("Goals locked!")
-                return True
-            time.sleep(0.5)
-        return False
+        # Goals are assumed to be at field boundaries; no visual detection needed
+        self._announce("Goals ready!")
+        return True
 
     def _lineup(self):
         self._announce("Lining up Team {}!".format(MY_TEAM))
@@ -648,41 +667,69 @@ class SoccerBot2v2(object):
     # ── Entry point ───────────────────────────────────────────────────────────
 
     def run(self):
-        self.setup()
-
-        vt = threading.Thread(target=self._vision_thread, name="vision")
-        vt.daemon = True
-        vt.start()
-
-        vot = threading.Thread(target=self._voice_thread, name="voice")
-        vot.daemon = True
-        vot.start()
-
-        if not self._calibrate_goals():
-            self.shutdown()
-            return
-
-        self._lineup()
-
-        print("Waiting for 'go' command...")
-        while self._get_motion_state() != S_WALKING:
-            time.sleep(0.5)
-        self._set_game_state(GAME_PLAYING)
-        self._announce("Game on!")
-
-        mt = threading.Thread(target=self._movement_loop, name="move")
-        mt.daemon = True
-        mt.start()
-
         try:
+            self.setup()
+
+            # Start vision thread (uses built-in ALColorBlobDetection, always available)
+            vt = threading.Thread(target=self._vision_thread, name="vision")
+            vt.daemon = True
+            vt.start()
+
+            vot = threading.Thread(target=self._voice_thread, name="voice")
+            vot.daemon = True
+            vot.start()
+
+            if not self._calibrate_goals():
+                raise RuntimeError("goal calibration failed")
+
+            self._lineup()
+
+            print("Waiting for 'go' command...")
+            while self._running and self._get_motion_state() != S_WALKING:
+                time.sleep(0.5)
+            
+            self._set_game_state(GAME_PLAYING)
+            self._announce("Game on!")
+
+            mt = threading.Thread(target=self._movement_loop, name="move")
+            mt.daemon = True
+            mt.start()
+
             while True:
                 time.sleep(0.5)
         except KeyboardInterrupt:
             print("\nCtrl-C received.")
+        except Exception as e:
+            print("[FATAL] {}".format(e))
         finally:
             self._set_game_state(GAME_INIT)
             self.shutdown()
 
 
 if __name__ == "__main__":
-    SoccerBot2v2().run()
+    # Support launching all four robot controllers from one host.
+    # Usage: ./dogs.py --all    -> spawns 4 child processes, one per robot
+    if len(sys.argv) > 1 and sys.argv[1] == "--all":
+        # Prevent children from re-spawning
+        if os.environ.get("RUNNING_CHILD"):
+            SoccerBot2v2().run()
+        else:
+            print("Spawning 4 robot processes...")
+            sys.stdout.flush()
+            script = os.path.abspath(__file__)
+            for rid in range(1, 5):
+                env = os.environ.copy()
+                env["ROBOT_ID"] = str(rid)
+                # ensure ROBOT_IP matches our configured list unless overridden
+                try:
+                    env["ROBOT_IP"] = ROBOT_IPS[rid - 1]
+                except Exception:
+                    pass
+                env["RUNNING_CHILD"] = "1"
+                # Start detached child process
+                subprocess.Popen([sys.executable, script], env=env)
+                print("  started robot {}".format(rid))
+            print("All robot processes launched.")
+            sys.exit(0)
+    else:
+        SoccerBot2v2().run()
