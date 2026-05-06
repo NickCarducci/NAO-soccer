@@ -646,17 +646,22 @@ class Soccer1v1(object):
                 pass
 
         # Try ALRedBallDetection first outside lineup
+        # Format: [[ts_s, ts_us], [azimuth, elevation, size_x, size_y], [cam_xyz...], [robot_xyz...], confidence]
         try:
             data = self.memory.getData("redBallDetected")
-            if data and len(data) > 1 and len(data[1]) > 0:
-                b = data[1][0]
+            if data and len(data) > 1 and isinstance(data[1], (list, tuple)) and len(data[1]) >= 3:
+                azimuth = float(data[1][0])
+                angular_size = float(data[1][2])
+                dist = (0.1 / angular_size) if angular_size > 1e-4 else 1.0
+                ball_result = (azimuth, dist)
                 if not self._ball_visible:
-                    print("[BALL] detected via ALRedBallDetection")
+                    print("[BALL] detected via ALRedBallDetection azi={:.3f} dist={:.2f}".format(azimuth, dist))
                     self._ball_visible = True
                 self._ball_miss_count = 0
-                return float(b[0]), float(b[2])
-        except Exception:
-            pass
+                return ball_result
+        except Exception as _ball_ex:
+            print("[BALL] ALRedBallDetection parse error: {}".format(_ball_ex))
+            sys.stdout.flush()
         # Blob fallback during lineup when ALRedBallDetection did not return.
         if self._get_game_state() == GAME_LINEUP:
             try:
@@ -1797,8 +1802,6 @@ class Soccer1v1(object):
                 self._set_head_yaw(yaw)
                 time.sleep(0.35)
                 raw = self._read_ball()
-                print("[BALL] yaw={:.1f} raw={}".format(yaw, raw))
-                sys.stdout.flush()
                 if raw is not None:
                     found[0] = raw
                     confirmed_hits[0] += 1
@@ -1824,13 +1827,21 @@ class Soccer1v1(object):
             except Exception:
                 pass
             time.sleep(0.2)
-            if seen_ball():
-                return found[0]
-            if confirmed_hits[0] > 0:
-                time.sleep(0.25)
-                if seen_ball():
+            post_raw = self._read_ball()
+            print("[BALL] post-rotate raw={}".format(post_raw))
+            sys.stdout.flush()
+            if post_raw is not None:
+                found[0] = post_raw
+                confirmed_hits[0] += 1
+                if confirmed_hits[0] >= max(1, BALL_CONFIRM_HITS):
+                    print("[BALL] confirmed post-rotate, returning {}".format(found[0]))
+                    sys.stdout.flush()
                     return found[0]
+            else:
+                confirmed_hits[0] = 0
             self._announce("Still looking for red ball.", priority=True)
+        print("[BALL] scan exhausted, found[0]={}".format(found[0]))
+        sys.stdout.flush()
         return None
 
     def _face_ball(self, timeout=3.0):
@@ -1862,10 +1873,32 @@ class Soccer1v1(object):
         """Use local geometry to move to a point between goal and red ball."""
         ball = self._find_ball_for_lineup()
         if ball is None:
+            print("[LINEUP] ball not found after full scan")
+            sys.stdout.flush()
             self._announce("I cannot see the red ball.", priority=True)
             return False
+        print("[LINEUP] ball found: {}".format(ball))
+        sys.stdout.flush()
 
         self._announce("Lining up.", priority=True)
+
+        # Re-detect goal from current pose so world coords match the current odometry frame.
+        self._goal_candidates_world = []
+        self._setup_goal_blob_detection()
+        time.sleep(0.3)
+        for _yaw in HEAD_SCAN_YAWS:
+            self._set_head_yaw(_yaw)
+            time.sleep(0.35)
+            _goals = self._detect_goals()
+            if _goals:
+                self._store_goal_world_points(_goals)
+        self._center_head()
+        if not self._select_nearest_goal_world_point():
+            print("[LINEUP] goal re-detect failed, using stale position")
+            sys.stdout.flush()
+        self._setup_red_ball_blob_detection()
+        time.sleep(0.2)
+
         goal_world = self._goal_world_point()
         if goal_world is None:
             print("[LINEUP] _goal_world_point is None - goals were never detected")
@@ -1878,6 +1911,8 @@ class Soccer1v1(object):
         goal_to_ball_x = ball_world[0] - goal_world[0]
         goal_to_ball_y = ball_world[1] - goal_world[1]
         goal_to_ball_len = math.hypot(goal_to_ball_x, goal_to_ball_y)
+        print("[LINEUP] goal={} ball_world={} dist={:.2f}".format(goal_world, ball_world, goal_to_ball_len))
+        sys.stdout.flush()
         if goal_to_ball_len < 0.2:
             self._announce("Goal and ball too close.", priority=True)
             return False
