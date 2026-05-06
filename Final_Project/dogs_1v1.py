@@ -41,12 +41,8 @@ sys.path.append(sdk_folder)
 os.environ["DYLD_LIBRARY_PATH"] = "/Users/nicholascarducci/Desktop/naoqi-sqk/lib"
 
 from naoqi import ALProxy
-try:
-    import cv2
-    import numpy as np
-except Exception:
-    cv2 = None
-    np = None
+# cv2 (OpenCV) and numpy are NOT available on the NAO robot runtime. Do not attempt to import them.
+cv2 = None
 
 
 class _PrefixedStream(object):
@@ -98,7 +94,7 @@ ROBOT_NAMES = {
 }
 
 ROBOT_IPS = {
-    1: "172.16.0.5",
+    1: "172.16.0.29",
     2: "172.16.0.3",
 }
 
@@ -209,7 +205,7 @@ GOAL_CAMERAS = [
 GOAL_SCAN_SECONDS = float(os.environ.get("GOAL_SCAN_SECONDS", "6.0"))
 LINEUP_BALL_DIST = float(os.environ.get("LINEUP_BALL_DIST", "1.10"))
 LINEUP_BALL_TIMEOUT = float(os.environ.get("LINEUP_BALL_TIMEOUT", "25.0"))
-BALL_SCAN_CYCLES = int(os.environ.get("BALL_SCAN_CYCLES", "4"))
+BALL_SCAN_CYCLES = int(os.environ.get("BALL_SCAN_CYCLES", "2"))
 BALL_SCAN_SECONDS = float(os.environ.get("BALL_SCAN_SECONDS", "18.0"))
 BALL_HEAD_PITCH = float(os.environ.get("BALL_HEAD_PITCH", "0.15"))
 BALL_CONFIRM_HITS = int(os.environ.get("BALL_CONFIRM_HITS", "1"))
@@ -247,13 +243,14 @@ GOAL_USE_MESH_BONUS = int(os.environ.get("GOAL_USE_MESH_BONUS", "0"))
 GOAL_MIN_CONFIRM_SAMPLES = int(os.environ.get("GOAL_MIN_CONFIRM_SAMPLES", "2"))
 GOAL_WORLD_CLUSTER_TOL = float(os.environ.get("GOAL_WORLD_CLUSTER_TOL", "1.0"))
 GOAL_DEBUG = int(os.environ.get("GOAL_DEBUG", "0"))
+VERBOSE = int(os.environ.get("VERBOSE", "0"))
 GOAL_VERBOSE_REJECTS = int(os.environ.get("GOAL_VERBOSE_REJECTS", "0"))
 GOAL_LOG_THROTTLE_SEC = float(os.environ.get("GOAL_LOG_THROTTLE_SEC", "1.5"))
 CALIB_VERBOSE_YAW = int(os.environ.get("CALIB_VERBOSE_YAW", "0"))
 YELLOW_HSV_LOWER_VALUES = (
-    int(os.environ.get("GOAL_HSV_H_LOW", "48")),
-    int(os.environ.get("GOAL_HSV_S_LOW", "140")),
-    int(os.environ.get("GOAL_HSV_V_LOW", "120")),
+    int(os.environ.get("GOAL_HSV_H_LOW", "44")),
+    int(os.environ.get("GOAL_HSV_S_LOW", "100")),
+    int(os.environ.get("GOAL_HSV_V_LOW", "100")),
 )
 YELLOW_HSV_UPPER_VALUES = (
     int(os.environ.get("GOAL_HSV_H_HIGH", "68")),
@@ -262,8 +259,8 @@ YELLOW_HSV_UPPER_VALUES = (
 )
 BLACK_MESH_S_MAX = int(os.environ.get("GOAL_BLACK_S_MAX", "90"))
 BLACK_MESH_V_MAX = int(os.environ.get("GOAL_BLACK_V_MAX", "80"))
-YELLOW_HSV_LOWER = np.array(list(YELLOW_HSV_LOWER_VALUES)) if np is not None else YELLOW_HSV_LOWER_VALUES
-YELLOW_HSV_UPPER = np.array(list(YELLOW_HSV_UPPER_VALUES)) if np is not None else YELLOW_HSV_UPPER_VALUES
+YELLOW_HSV_LOWER = YELLOW_HSV_LOWER_VALUES
+YELLOW_HSV_UPPER = YELLOW_HSV_UPPER_VALUES
 VIDEO_RESOLUTION = 2       # VGA, 640x480
 VIDEO_COLORSPACE_RGB = 11  # kRGBColorSpace
 VIDEO_FPS = 10
@@ -339,7 +336,7 @@ class Soccer1v1(object):
         self._last_goal_debug = 0
         self._active_camera = GOAL_CAMERA
         self._video_clients = {}
-        self._opencv_available = (cv2 is not None and np is not None)
+        self._opencv_available = (cv2 is not None)
         self._opencv_unavailable_logged = False
         self._throttled_log_times = {}
         self._rgb_stats = {
@@ -490,10 +487,10 @@ class Soccer1v1(object):
         sys.stdout.flush()
         diag_enabled = os.environ.get("DUMP_ALMEMORY_KEYS") == "1"
         if diag_enabled:
-            print("[DIAG] DUMP_ALMEMORY_KEYS=1 enabled")
+            # print("[DIAG] DUMP_ALMEMORY_KEYS=1 enabled")
             sys.stdout.flush()
         else:
-            print("[DIAG] ALMemory probe disabled (set DUMP_ALMEMORY_KEYS=1 to enable)")
+            # print("[DIAG] ALMemory probe disabled (set DUMP_ALMEMORY_KEYS=1 to enable)")
             sys.stdout.flush()
         try:
             self.color_blob = ALProxy("ALColorBlobDetection", ROBOT_IP, ROBOT_PORT)
@@ -503,10 +500,10 @@ class Soccer1v1(object):
                 pass
             try:
                 self.color_blob.subscribe(COLOR_BLOB_SUBSCRIPTION)
-                print("[VISION] color_blob subscribed: {}".format(COLOR_BLOB_SUBSCRIPTION))
+                # print("[VISION] color_blob subscribed: {}".format(COLOR_BLOB_SUBSCRIPTION))
                 sys.stdout.flush()
             except Exception as e:
-                print("[VISION] color_blob subscribe failed: {}".format(e))
+                # print("[VISION] color_blob subscribe failed: {}".format(e))
                 sys.stdout.flush()
             self._setup_goal_blob_detection()
         except Exception as e:
@@ -749,10 +746,7 @@ class Soccer1v1(object):
 
         if best_cluster is None or len(best_cluster) < GOAL_MIN_CONFIRM_SAMPLES:
             if GOAL_DEBUG:
-                print("[GOAL] candidate cluster too weak: best_cluster={} required={} total_samples={}".format(
-                    0 if best_cluster is None else len(best_cluster),
-                    GOAL_MIN_CONFIRM_SAMPLES,
-                    len(self._goal_candidates_world)))
+                # print("[GOAL] candidate cluster too weak: best_cluster={} required={} total_samples={}".format(0 if best_cluster is None else len(best_cluster), GOAL_MIN_CONFIRM_SAMPLES, len(self._goal_candidates_world)))
                 sys.stdout.flush()
             return False
 
@@ -762,8 +756,7 @@ class Soccer1v1(object):
         max_area = max(c[1] for c in best_cluster)
 
         self._goal_points_world = [(avg_x, avg_y)]
-        print("[GOAL] selected stable cluster dist~{:.2f} area_max={:.0f} point=({:.2f}, {:.2f}) cluster_size={} of {} samples".format(
-            avg_dist, max_area, avg_x, avg_y, len(best_cluster), len(self._goal_candidates_world)))
+        # print("[GOAL] selected stable cluster dist~{:.2f} area_max={:.0f} point=({:.2f}, {:.2f}) cluster_size={} of {} samples".format( avg_dist, max_area, avg_x, avg_y, len(best_cluster), len(self._goal_candidates_world)))
         sys.stdout.flush()
         return True
 
@@ -803,13 +796,12 @@ class Soccer1v1(object):
                     GOAL_MIN_SIZE,
                 ])
                 self.tracker.track("ColorBlob")
-                print("[VISION] ALTracker tracking ColorBlob target")
+                # print("[VISION] ALTracker tracking ColorBlob target")
             except Exception as e:
-                print("[VISION] tracker ColorBlob activation failed: {}".format(e))
-            self._color_blob_mode = "goal"
-            print("[VISION] Color blob target: neon yellow goals rgb={} threshold={}".format(
-                GOAL_YELLOW_RGB, COLOR_THRESHOLD))
-            sys.stdout.flush()
+                # print("[VISION] tracker ColorBlob activation failed: {}".format(e))
+                self._color_blob_mode = "goal"
+                # print("[VISION] Color blob target: neon yellow goals rgb={} threshold={}".format(GOAL_YELLOW_RGB, COLOR_THRESHOLD))
+                sys.stdout.flush()
         except Exception as e:
             print("WARNING: goal blob setup failed: {}".format(e))
             sys.stdout.flush()
@@ -859,8 +851,7 @@ class Soccer1v1(object):
             except Exception:
                 pass
             self._color_blob_mode = "robot"
-            print("[VISION] Color blob target: white robots rgb={} threshold={}".format(
-                ROBOT_WHITE_RGB, COLOR_THRESHOLD))
+            # print("[VISION] Color blob target: white robots rgb={} threshold={}".format( ROBOT_WHITE_RGB, COLOR_THRESHOLD))
         except Exception as e:
             print("WARNING: robot blob setup failed: {}".format(e))
 
@@ -885,8 +876,7 @@ class Soccer1v1(object):
             except Exception:
                 pass
             self._color_blob_mode = "red_ball"
-            print("[VISION] Color blob target: red ball rgb={} threshold={}".format(
-                RED_BALL_RGB, COLOR_THRESHOLD))
+            # print("[VISION] Color blob target: red ball rgb={} threshold={}".format( RED_BALL_RGB, COLOR_THRESHOLD))
         except Exception as e:
             print("WARNING: red ball blob setup failed: {}".format(e))
 
@@ -996,23 +986,7 @@ class Soccer1v1(object):
         sys.stdout.flush()
 
     def _capture_hsv_frame(self, camera_id):
-        if cv2 is None or np is None:
-            return None
-        try:
-            client = self._video_client_for_camera(camera_id)
-            result = self.video.getImageRemote(client)
-            if result is None:
-                return None
-            width, height, channels, img_buffer = (
-                result[0], result[1], result[2], result[6])
-            img = np.frombuffer(img_buffer, dtype=np.uint8)
-            img = img.reshape((height, width, channels))
-            return cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
-        except Exception as e:
-            if GOAL_DEBUG:
-                print("[GOAL] frame capture failed: {}".format(e))
-                sys.stdout.flush()
-            return None
+        return None  # cv2/numpy unavailable on NAO runtime
 
     def _detect_goals_from_frame(self, camera_id):
         frame = self._capture_hsv_frame(camera_id)
@@ -1302,18 +1276,31 @@ class Soccer1v1(object):
             return None
 
     def _detect_robots(self):
-        """Detect white blobs using ALColorBlobDetection."""
+        """Detect white robot blobs using ALColorBlobDetection.
+        Format matches ALTracker/ColorBlobDetected: [[x,y,z,...], [...], ts, camId, conf]
+        """
         try:
-            blobs = self._read_color_blobs()
-            if not blobs:
+            data = self._read_color_blobs()
+            if not data:
                 return []
-            robots = []
-            for blob in blobs:
-                if len(blob) >= 7:
-                    x_ang, dist = blob[4], blob[6]
-                    if 0.1 < dist < 3.0:
-                        robots.append((float(dist), float(x_ang)))
-            return robots
+            pos = None
+            for elem in data:
+                if isinstance(elem, (list, tuple)) and len(elem) >= 3:
+                    try:
+                        v = [float(elem[i]) for i in range(3)]
+                        if all(abs(v[i]) < 50.0 for i in range(3)):
+                            pos = elem
+                            break
+                    except (TypeError, ValueError):
+                        continue
+            if pos is None:
+                return []
+            x, y, z = float(pos[0]), float(pos[1]), float(pos[2])
+            dist = math.sqrt(x*x + y*y + z*z)
+            x_ang = math.atan2(y, x)
+            if 0.1 < dist < 4.0:
+                return [(dist, x_ang)]
+            return []
         except Exception:
             return []
 
@@ -1342,8 +1329,13 @@ class Soccer1v1(object):
                     print("[GOAL]   data[0]={}, type={}".format(data[0], type(data[0])))
                 sys.stdout.flush()
             if not isinstance(data[0], list) or len(data[0]) < 3:
+                # data[0] is not a position (may be timestamp); try RGB fallback.
+                for camera_id in GOAL_CAMERAS:
+                    goals = self._detect_goals_from_rgb_frame(camera_id)
+                    if goals:
+                        return goals
                 return []
-            pos = data[0]  # use raw (not filtered) position
+            pos = data[0]
             x, y, z = float(pos[0]), float(pos[1]), float(pos[2])
             dist = math.sqrt(x*x + y*y + z*z)
             x_ang = math.atan2(y, x)
@@ -1362,6 +1354,11 @@ class Soccer1v1(object):
                 if GOAL_DEBUG:
                     print("[GOAL] REJECTED: dist {:.3f} outside range [0.1, 8.0]".format(dist))
                     sys.stdout.flush()
+            # dist out of range; try RGB fallback before giving up.
+            for camera_id in GOAL_CAMERAS:
+                goals = self._detect_goals_from_rgb_frame(camera_id)
+                if goals:
+                    return goals
             return []
         except Exception as e:
             print("[GOAL] parse error: {}".format(e))
@@ -1376,7 +1373,7 @@ class Soccer1v1(object):
         """
         if self._scanner_running:
             return
-        print("[SCANNER] starting background goal scanner...")
+        # print("[SCANNER] starting background goal scanner...")
         sys.stdout.flush()
         self._scanner_running = True
         self._scanner_thread = threading.Thread(target=self._goal_scanner_thread)
@@ -1408,7 +1405,7 @@ class Soccer1v1(object):
         moving the base so it can run concurrently with other actions.
         """
         try:
-            print("[SCANNER] thread entered main loop")
+            # print("[SCANNER] thread entered main loop")
             sys.stdout.flush()
             while self._scanner_running and self._running:
                 for camera_id in GOAL_CAMERAS:
@@ -1435,8 +1432,7 @@ class Soccer1v1(object):
                                 # store observed goals as world points
                                 self._store_goal_world_points(goals)
                                 try:
-                                    print("[SCANNER] found {} goals on camera {} yaw {:.2f}; candidates_world={}".format(
-                                        len(goals), camera_id, yaw, len(self._goal_candidates_world)))
+                                    # print("[SCANNER] found {} goals on camera {} yaw {:.2f}; candidates_world={}".format(len(goals), camera_id, yaw, len(self._goal_candidates_world)))
                                     sys.stdout.flush()
                                 except Exception:
                                     pass
@@ -1452,7 +1448,7 @@ class Soccer1v1(object):
         Uses moveToward for smooth, interruptible rotation bursts.
         """
         try:
-            print("[TURN] turning thread entered main loop")
+            # print("[TURN] turning thread entered main loop")
             sys.stdout.flush()
             # Continuous gentle rotation to avoid jitter from repeated start/stops.
             while self._turn_running and self._running:
@@ -1527,7 +1523,7 @@ class Soccer1v1(object):
                     elif len(goals) == 1:
                         self._store_goal_world_points(goals)
                         if GOAL_DEBUG:
-                            print("[GOAL] ignoring single goal blob until a second stable goal is found")
+                            # print("[GOAL] ignoring single goal blob until a second stable goal is found")
                             sys.stdout.flush()
                 self._wall_detected = self._detect_wall_edge()
             except Exception:
@@ -1557,6 +1553,11 @@ class Soccer1v1(object):
                             self._announce("Stopping")
                             self.motion.stopMove()
                             self._set_motion_state(S_STOPPED)
+                            try:
+                                self.memory.insertData("WordRecognized", ["", 0.0])
+                            except Exception:
+                                pass
+                            self._last_word = None
                         elif word in ("go", "fetch"):
                             self._announce("Going!")
                             self._set_motion_state(S_WALKING)
@@ -1584,7 +1585,7 @@ class Soccer1v1(object):
         step_theta = (2.0 * math.pi) / float(max(1, FULL_SCAN_STEPS))
 
         for step in range(FULL_SCAN_STEPS):
-            for yaw in self._head_sweep():
+            for _ in self._head_sweep():
                 if stop_when is not None and stop_when():
                     self.motion.stopMove()
                     self._center_head()
@@ -1613,24 +1614,23 @@ class Soccer1v1(object):
         """
         self._announce("Scanning for goals.", priority=True)
         if YELLOW_HSV_LOWER is not None and YELLOW_HSV_UPPER is not None:
-            print("[CALIB] HSV range: H=[{}-{}], S=[{}-{}], V=[{}-{}]".format(
-                YELLOW_HSV_LOWER[0], YELLOW_HSV_UPPER[0],
-                YELLOW_HSV_LOWER[1], YELLOW_HSV_UPPER[1],
-                YELLOW_HSV_LOWER[2], YELLOW_HSV_UPPER[2]))
-        print("[CALIB] RGB target: {}".format(GOAL_YELLOW_RGB))
-        print("[CALIB] OpenCV HSV fallback available: {}".format(self._opencv_available))
+            _ = 0
+        # print("[CALIB] HSV range: H=[{}-{}], S=[{}-{}], V=[{}-{}]".format(YELLOW_HSV_LOWER[0], YELLOW_HSV_UPPER[0], YELLOW_HSV_LOWER[1], YELLOW_HSV_UPPER[1], YELLOW_HSV_LOWER[2], YELLOW_HSV_UPPER[2]))
+        # print("[CALIB] RGB target: {}".format(GOAL_YELLOW_RGB))
+        # print("[CALIB] OpenCV HSV fallback available: {}".format(self._opencv_available))
         if not self._opencv_available and not self._opencv_unavailable_logged:
-            print("[CALIB] OpenCV/numpy unavailable on this robot runtime; skipping HSV frame fallback attempts")
+            # print("[CALIB] OpenCV/numpy unavailable on this robot runtime; skipping HSV frame fallback attempts")
             self._opencv_unavailable_logged = True
         # Probe ALMemory for tracker-related keys
         try:
             for prefix in ("ALTracker", "ColorBlob", "color"):
                 keys = self.memory.getDataList(prefix)
                 if keys:
-                    print("[CALIB] ALMemory keys starting with '{}': {}".format(prefix, keys[:5]))
+                    _ = 0
+                    # print("[CALIB] ALMemory keys starting with '{}': {}".format(prefix, keys[:5]))
         except Exception as e:
-            print("[CALIB] ALMemory key probe failed: {}".format(e))
-        sys.stdout.flush()
+            # print("[CALIB] ALMemory key probe failed: {}".format(e))
+            sys.stdout.flush()
         # Keep a fixed downward pitch while scanning yellow goal blobs.
         self._set_head_pitch(GOAL_HEAD_PITCH)
         time.sleep(0.3)
@@ -1650,19 +1650,20 @@ class Soccer1v1(object):
             }
             yaw_hits = 0
             yaw_misses = 0
-            for yaw in HEAD_SCAN_YAWS:
-                if not self._running:
-                    break
-                self._set_head_yaw(yaw)
-                time.sleep(0.35)
-                
-                # Check if blob data exists in ALMemory
-                raw_data = self.memory.getData("ALTracker/ColorBlobDetected")
-                if CALIB_VERBOSE_YAW:
-                    print("[CALIB] yaw={:.1f} raw_data_exists={}".format(yaw, raw_data is not None and len(raw_data) > 0 if isinstance(raw_data, list) else raw_data is not None))
-                    sys.stdout.flush()
-                
-                # Try ALTracker blob detection first
+            # Continuous sweep: move head from one extreme to the other in one motion,
+            # sampling detections at ~10 Hz while the head moves smoothly.
+            sweep_start = HEAD_SCAN_YAWS[0]
+            sweep_end = HEAD_SCAN_YAWS[-1]
+            sweep_direction = 1  # alternate direction each sweep
+            if step % 2 == 1:
+                sweep_start, sweep_end = sweep_end, sweep_start
+            self._set_head_yaw(sweep_start, speed=0.5)
+            time.sleep(0.25)
+            # Start head sweeping to the far end continuously.
+            self._set_head_yaw(sweep_end, speed=0.20)
+            sweep_duration = abs(sweep_end - sweep_start) / (3.0 * 0.20) + 0.2
+            sweep_deadline = time.time() + sweep_duration
+            while self._running and time.time() < sweep_deadline:
                 goals = self._detect_goals()
                 if goals:
                     yaw_hits += 1
@@ -1676,46 +1677,16 @@ class Soccer1v1(object):
                         return True
                 else:
                     yaw_misses += 1
-                    # Debug: show raw memory data
-                    raw_blobs = self._read_color_blobs()
-                    if not raw_blobs and CALIB_VERBOSE_YAW:
-                        print("[CALIB] no blobs in ALMemory at yaw={:.1f}".format(yaw))
-                        sys.stdout.flush()
-                
-                # Fall back to frame-based HSV detection
-                if self._opencv_available:
-                    try:
-                        for camera_id in GOAL_CAMERAS:
-                            frame_goals = self._detect_goals_from_frame(camera_id)
-                            if frame_goals:
-                                self._store_goal_world_points(frame_goals)
-                                print("[CALIB] found {} goals via HSV frame cam{}".format(len(frame_goals), camera_id))
-                                sys.stdout.flush()
-                                if len(self._goal_candidates_world) >= 2 and self._select_nearest_goal_world_point():
-                                    self.motion.stopMove()
-                                    self._center_head()
-                                    self._announce("Goal locked.", priority=True)
-                                    return True
-                    except Exception as e:
-                        print("[CALIB] frame detection failed: {}".format(e))
-                        sys.stdout.flush()
-                else:
-                    pass
+                time.sleep(0.10)
 
-            print("[CALIB] sweep {} summary: goal_hits={} misses={} candidates={} rgb(frames={} accept={} no_yellow={} clusters={} rejects[s={},sh={},sc={},d={}])".format(
-                step + 1,
-                yaw_hits,
-                yaw_misses,
-                len(self._goal_candidates_world),
-                self._rgb_stats["frames"],
-                self._rgb_stats["accept"],
-                self._rgb_stats["no_yellow"],
-                self._rgb_stats["clusters"],
-                self._rgb_stats["reject_size"],
-                self._rgb_stats["reject_shape"],
-                self._rgb_stats["reject_score"],
-                self._rgb_stats["reject_dist"]))
-            sys.stdout.flush()
+            if VERBOSE:
+                print("[CALIB] sweep {} summary: goal_hits={} misses={} candidates={} rgb(frames={} accept={} no_yellow={} clusters={} rejects[s={},sh={},sc={},d={}])".format(
+                    step + 1, yaw_hits, yaw_misses, len(self._goal_candidates_world),
+                    self._rgb_stats["frames"], self._rgb_stats["accept"],
+                    self._rgb_stats["no_yellow"], self._rgb_stats["clusters"],
+                    self._rgb_stats["reject_size"], self._rgb_stats["reject_shape"],
+                    self._rgb_stats["reject_score"], self._rgb_stats["reject_dist"]))
+                sys.stdout.flush()
 
             if not self._running:
                 break
@@ -1786,12 +1757,11 @@ class Soccer1v1(object):
             found[0] = result
             confirmed_hits[0] += 1
             if confirmed_hits[0] < max(1, BALL_CONFIRM_HITS):
-                print("[BALL] candidate seen; waiting for confirmation {}/{}".format(
-                    confirmed_hits[0], max(1, BALL_CONFIRM_HITS)))
+                # print("[BALL] candidate seen; waiting for confirmation {}/{}".format(confirmed_hits[0], max(1, BALL_CONFIRM_HITS)))
                 sys.stdout.flush()
                 return False
             if not self._ball_visible:
-                print("[BALL] confirmed detection")
+                # print("[BALL] confirmed detection")
                 self._ball_visible = True
             return True
 
@@ -1799,33 +1769,37 @@ class Soccer1v1(object):
         cycle = 0
         while self._running and (time.time() - start) < max_seconds:
             cycle += 1
-            print("[BALL] lineup scan cycle {} of {}".format(cycle, BALL_SCAN_CYCLES))
+            # print("[BALL] lineup scan cycle {} of {}".format(cycle, BALL_SCAN_CYCLES))
             sys.stdout.flush()
-            for yaw in HEAD_SCAN_YAWS:
-                if not self._running or (time.time() - start) >= max_seconds:
-                    break
-                self._set_head_yaw(yaw)
-                time.sleep(0.35)
+            # Continuous sweep: alternate direction each cycle for even coverage.
+            b_start = HEAD_SCAN_YAWS[0] if cycle % 2 == 1 else HEAD_SCAN_YAWS[-1]
+            b_end   = HEAD_SCAN_YAWS[-1] if cycle % 2 == 1 else HEAD_SCAN_YAWS[0]
+            self._set_head_yaw(b_start, speed=0.5)
+            time.sleep(0.20)
+            self._set_head_yaw(b_end, speed=0.20)
+            b_duration = abs(b_end - b_start) / (3.0 * 0.20) + 0.2
+            b_deadline = time.time() + b_duration
+            while self._running and time.time() < b_deadline and (time.time() - start) < max_seconds:
                 raw = self._read_ball()
                 if raw is not None:
                     found[0] = raw
                     confirmed_hits[0] += 1
                     if confirmed_hits[0] >= max(1, BALL_CONFIRM_HITS):
                         if not self._ball_visible:
-                            print("[BALL] confirmed detection")
+                            # print("[BALL] confirmed detection")
                             self._ball_visible = True
                         return found[0]
                 else:
                     confirmed_hits[0] = 0
-                # Candidate seen but not yet confirmed, so: recheck in-place before moving head
                 if confirmed_hits[0] > 0:
-                    time.sleep(0.25)
+                    time.sleep(0.10)
                     if seen_ball():
                         return found[0]
+                time.sleep(0.08)
             if cycle >= BALL_SCAN_CYCLES:
                 break
             try:
-                t = threading.Thread(target=self.motion.moveTo, args=(0.0, 0.0, math.pi / 2.0))
+                t = threading.Thread(target=self.motion.moveTo, args=(0.0, 0.0, -math.pi / 2.0))
                 t.daemon = True
                 t.start()
                 t.join(timeout=3.5)
@@ -1835,19 +1809,19 @@ class Soccer1v1(object):
                 break
             time.sleep(0.2)
             post_raw = self._read_ball()
-            print("[BALL] post-rotate raw={}".format(post_raw))
+            # print("[BALL] post-rotate raw={}".format(post_raw))
             sys.stdout.flush()
             if post_raw is not None:
                 found[0] = post_raw
                 confirmed_hits[0] += 1
                 if confirmed_hits[0] >= max(1, BALL_CONFIRM_HITS):
-                    print("[BALL] confirmed post-rotate, returning {}".format(found[0]))
+                    # print("[BALL] confirmed post-rotate, returning {}".format(found[0]))
                     sys.stdout.flush()
                     return found[0]
             else:
                 confirmed_hits[0] = 0
             self._announce("Still looking for red ball.", priority=True)
-        print("[BALL] scan exhausted, found[0]={}".format(found[0]))
+        # print("[BALL] scan exhausted, found[0]={}".format(found[0]))
         sys.stdout.flush()
         return None
 
@@ -1911,67 +1885,44 @@ class Soccer1v1(object):
             except Exception:
                 pass
 
-        # Step 2: re-read ball distance from new position (keep azimuth from fresh read or original).
-        time.sleep(0.3)
-        _fresh = self._read_ball()
-        if _fresh is not None:
-            ball = _fresh
-        ball_azi, ball_dist = ball
-
-        # Re-detect goal in current robot frame (no world coords).
+        # Step 2b.5: arc sideways around the ball toward the own-goal side.
+        # Quick goal re-detect to find which lateral direction is "toward own goal."
+        time.sleep(0.2)
         global GOAL_DEBUG
-        _prev_debug = GOAL_DEBUG
+        _prev_dbg = GOAL_DEBUG
         GOAL_DEBUG = 0
-        goal_robot = None
         self._setup_goal_blob_detection()
         time.sleep(0.2)
+        _goal_azi = None
         for _yaw in HEAD_SCAN_YAWS:
             if not self._running:
                 break
             self._set_head_yaw(_yaw)
-            time.sleep(0.30)
-            _goals = self._detect_goals()
-            if _goals:
-                g = _goals[0]
-                if len(g) >= 5:
-                    goal_robot = (float(g[3]), float(g[4]))
-                    break
+            time.sleep(0.25)
+            _gs = self._detect_goals()
+            if _gs and len(_gs[0]) >= 5:
+                _goal_azi = float(_gs[0][3])
+                break
         self._center_head()
-        GOAL_DEBUG = _prev_debug
+        GOAL_DEBUG = _prev_dbg
         self._setup_red_ball_blob_detection()
         time.sleep(0.2)
 
-        if goal_robot is not None:
-            goal_azi, goal_dist = goal_robot
-            bx = ball_dist * math.cos(ball_azi)
-            by = ball_dist * math.sin(ball_azi)
-            gx = goal_dist * math.cos(goal_azi)
-            gy = goal_dist * math.sin(goal_azi)
-            g2b_x, g2b_y = bx - gx, by - gy
-            g2b_len = math.hypot(g2b_x, g2b_y)
-            print("[LINEUP] close-range: goal_azi={:.2f} ball_azi={:.2f} ball_dist={:.2f}".format(
-                goal_azi, ball_azi, ball_dist))
+        if _goal_azi is not None and self._running:
+            # Arc around the ball toward own goal's side.
+            # NAO arcs by combining forward walk with a turn; pure lateral doesn't move reliably.
+            arc_dir = 1 if _goal_azi >= 0 else -1
+            print("[LINEUP] arcing goal_azi={:.2f}".format(_goal_azi))
             sys.stdout.flush()
-            if g2b_len >= 0.2:
-                ux, uy = g2b_x / g2b_len, g2b_y / g2b_len
-                standoff = max(0.20, min(0.40, ball_dist * 0.8))
-                tx = bx - ux * standoff
-                ty = by - uy * standoff
-                dtheta = math.atan2(by - ty, bx - tx)
-                dist_to_target = math.hypot(tx, ty)
-                if dist_to_target < 0.6:  # only move if adjustment is small
-                    try:
-                        t = threading.Thread(target=self.motion.moveTo,
-                                             args=(tx, ty, dtheta))
-                        t.daemon = True
-                        t.start()
-                        while t.is_alive() and self._running:
-                            t.join(timeout=0.5)
-                        if not self._running:
-                            self.motion.stopMove()
-                            return False
-                    except Exception:
-                        pass
+            arc_end = time.time() + 2.5
+            while self._running and time.time() < arc_end:
+                _b = self._read_ball()
+                if _b is None:
+                    break
+                # Walk slowly while turning to arc around the ball.
+                self.motion.moveToward(0.18, 0.0, 0.55 * arc_dir)
+                time.sleep(0.10)
+            self.motion.stopMove()
 
         # Step 3: center head then face the ball so azimuth is in body frame.
         self._center_head()
@@ -2046,7 +1997,7 @@ class Soccer1v1(object):
 
         ball_azi, ball_dist = ball_pos
 
-        # Ball velocity disabled — angular-size distance is too noisy to produce
+        # Ball velocity disabled; angular-size distance is too noisy to produce
         # stable delta signals; intercept prediction causes wave-pattern walking.
         self._ball_moving = False
         self._ball_pos_prev = ball_pos
