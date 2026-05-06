@@ -98,8 +98,8 @@ ROBOT_NAMES = {
 }
 
 ROBOT_IPS = {
-    1: "172.16.0.4",
-    2: "172.16.0.29",
+    1: "172.16.0.5",
+    2: "172.16.0.3",
 }
 
 def _launch_both_players():
@@ -211,7 +211,7 @@ LINEUP_BALL_DIST = float(os.environ.get("LINEUP_BALL_DIST", "1.10"))
 LINEUP_BALL_TIMEOUT = float(os.environ.get("LINEUP_BALL_TIMEOUT", "25.0"))
 BALL_SCAN_CYCLES = int(os.environ.get("BALL_SCAN_CYCLES", "4"))
 BALL_SCAN_SECONDS = float(os.environ.get("BALL_SCAN_SECONDS", "18.0"))
-BALL_HEAD_PITCH = float(os.environ.get("BALL_HEAD_PITCH", "0.4"))
+BALL_HEAD_PITCH = float(os.environ.get("BALL_HEAD_PITCH", "0.15"))
 BALL_CONFIRM_HITS = int(os.environ.get("BALL_CONFIRM_HITS", "1"))
 FULL_SCAN_STEPS = int(os.environ.get("FULL_SCAN_STEPS", "3"))
 GOAL_HEAD_PITCH = float(os.environ.get("GOAL_HEAD_PITCH", "0.3"))
@@ -246,17 +246,17 @@ GOAL_MIN_YELLOW_DENSITY = float(os.environ.get("GOAL_MIN_YELLOW_DENSITY", "0.03"
 GOAL_USE_MESH_BONUS = int(os.environ.get("GOAL_USE_MESH_BONUS", "0"))
 GOAL_MIN_CONFIRM_SAMPLES = int(os.environ.get("GOAL_MIN_CONFIRM_SAMPLES", "2"))
 GOAL_WORLD_CLUSTER_TOL = float(os.environ.get("GOAL_WORLD_CLUSTER_TOL", "1.0"))
-GOAL_DEBUG = int(os.environ.get("GOAL_DEBUG", "1"))
+GOAL_DEBUG = int(os.environ.get("GOAL_DEBUG", "0"))
 GOAL_VERBOSE_REJECTS = int(os.environ.get("GOAL_VERBOSE_REJECTS", "0"))
 GOAL_LOG_THROTTLE_SEC = float(os.environ.get("GOAL_LOG_THROTTLE_SEC", "1.5"))
 CALIB_VERBOSE_YAW = int(os.environ.get("CALIB_VERBOSE_YAW", "0"))
 YELLOW_HSV_LOWER_VALUES = (
-    int(os.environ.get("GOAL_HSV_H_LOW", "40")),
-    int(os.environ.get("GOAL_HSV_S_LOW", "100")),
-    int(os.environ.get("GOAL_HSV_V_LOW", "100")),
+    int(os.environ.get("GOAL_HSV_H_LOW", "48")),
+    int(os.environ.get("GOAL_HSV_S_LOW", "140")),
+    int(os.environ.get("GOAL_HSV_V_LOW", "120")),
 )
 YELLOW_HSV_UPPER_VALUES = (
-    int(os.environ.get("GOAL_HSV_H_HIGH", "70")),
+    int(os.environ.get("GOAL_HSV_H_HIGH", "68")),
     int(os.environ.get("GOAL_HSV_S_HIGH", "255")),
     int(os.environ.get("GOAL_HSV_V_HIGH", "255")),
 )
@@ -1560,6 +1560,11 @@ class Soccer1v1(object):
                         elif word in ("go", "fetch"):
                             self._announce("Going!")
                             self._set_motion_state(S_WALKING)
+                            try:
+                                self.memory.insertData("WordRecognized", ["", 0.0])
+                            except Exception:
+                                pass
+                            self._last_word = None
             except Exception:
                 pass
             time.sleep(VOICE_POLL_SEC)
@@ -1823,9 +1828,11 @@ class Soccer1v1(object):
                 t = threading.Thread(target=self.motion.moveTo, args=(0.0, 0.0, math.pi / 2.0))
                 t.daemon = True
                 t.start()
-                t.join(timeout=4.0)
+                t.join(timeout=3.5)
             except Exception:
                 pass
+            if not self._running:
+                break
             time.sleep(0.2)
             post_raw = self._read_ball()
             print("[BALL] post-rotate raw={}".format(post_raw))
@@ -1877,79 +1884,105 @@ class Soccer1v1(object):
             sys.stdout.flush()
             self._announce("I cannot see the red ball.", priority=True)
             return False
-        print("[LINEUP] ball found: {}".format(ball))
+        print("[LINEUP] ball found: azi={:.2f} dist={:.2f}".format(ball[0], ball[1]))
         sys.stdout.flush()
 
         self._announce("Lining up.", priority=True)
 
-        # Re-detect goal from current pose so world coords match the current odometry frame.
-        self._goal_candidates_world = []
-        self._setup_goal_blob_detection()
+        # Step 1: face the ball first, then walk straight toward it.
+        CLOSE_RANGE = 0.45  # meters: close enough for precise positioning
+        ball_azi, ball_dist = ball
+        # Turn to face ball by actually tracking it, which is more reliable than blind azimuth rotation.
+        ball = self._face_ball(timeout=3.0) or ball
+        ball_azi, ball_dist = ball
+        if ball_dist > CLOSE_RANGE:
+            walk_dist = ball_dist - CLOSE_RANGE
+            print("[LINEUP] walking {:.2f}m straight to ball".format(walk_dist))
+            sys.stdout.flush()
+            try:
+                t = threading.Thread(target=self.motion.moveTo, args=(walk_dist, 0.0, 0.0))
+                t.daemon = True
+                t.start()
+                while t.is_alive() and self._running:
+                    t.join(timeout=0.5)
+                if not self._running:
+                    self.motion.stopMove()
+                    return False
+            except Exception:
+                pass
+
+        # Step 2: re-read ball distance from new position (keep azimuth from fresh read or original).
         time.sleep(0.3)
+        _fresh = self._read_ball()
+        if _fresh is not None:
+            ball = _fresh
+        ball_azi, ball_dist = ball
+
+        # Re-detect goal in current robot frame (no world coords).
+        global GOAL_DEBUG
+        _prev_debug = GOAL_DEBUG
+        GOAL_DEBUG = 0
+        goal_robot = None
+        self._setup_goal_blob_detection()
+        time.sleep(0.2)
         for _yaw in HEAD_SCAN_YAWS:
+            if not self._running:
+                break
             self._set_head_yaw(_yaw)
-            time.sleep(0.35)
+            time.sleep(0.30)
             _goals = self._detect_goals()
             if _goals:
-                self._store_goal_world_points(_goals)
+                g = _goals[0]
+                if len(g) >= 5:
+                    goal_robot = (float(g[3]), float(g[4]))
+                    break
         self._center_head()
-        if not self._select_nearest_goal_world_point():
-            print("[LINEUP] goal re-detect failed, using stale position")
-            sys.stdout.flush()
+        GOAL_DEBUG = _prev_debug
         self._setup_red_ball_blob_detection()
         time.sleep(0.2)
 
-        goal_world = self._goal_world_point()
-        if goal_world is None:
-            print("[LINEUP] _goal_world_point is None - goals were never detected")
+        if goal_robot is not None:
+            goal_azi, goal_dist = goal_robot
+            bx = ball_dist * math.cos(ball_azi)
+            by = ball_dist * math.sin(ball_azi)
+            gx = goal_dist * math.cos(goal_azi)
+            gy = goal_dist * math.sin(goal_azi)
+            g2b_x, g2b_y = bx - gx, by - gy
+            g2b_len = math.hypot(g2b_x, g2b_y)
+            print("[LINEUP] close-range: goal_azi={:.2f} ball_azi={:.2f} ball_dist={:.2f}".format(
+                goal_azi, ball_azi, ball_dist))
             sys.stdout.flush()
-            self._announce("Goal geometry missing.", priority=True)
-            return False
+            if g2b_len >= 0.2:
+                ux, uy = g2b_x / g2b_len, g2b_y / g2b_len
+                standoff = max(0.20, min(0.40, ball_dist * 0.8))
+                tx = bx - ux * standoff
+                ty = by - uy * standoff
+                dtheta = math.atan2(by - ty, bx - tx)
+                dist_to_target = math.hypot(tx, ty)
+                if dist_to_target < 0.6:  # only move if adjustment is small
+                    try:
+                        t = threading.Thread(target=self.motion.moveTo,
+                                             args=(tx, ty, dtheta))
+                        t.daemon = True
+                        t.start()
+                        while t.is_alive() and self._running:
+                            t.join(timeout=0.5)
+                        if not self._running:
+                            self.motion.stopMove()
+                            return False
+                    except Exception:
+                        pass
 
-        ball = self._face_ball(timeout=2.0) or ball
-        ball_world = self._ball_world_point(ball)
-        goal_to_ball_x = ball_world[0] - goal_world[0]
-        goal_to_ball_y = ball_world[1] - goal_world[1]
-        goal_to_ball_len = math.hypot(goal_to_ball_x, goal_to_ball_y)
-        print("[LINEUP] goal={} ball_world={} dist={:.2f}".format(goal_world, ball_world, goal_to_ball_len))
-        sys.stdout.flush()
-        if goal_to_ball_len < 0.2:
-            self._announce("Goal and ball too close.", priority=True)
-            return False
-
-        ux = goal_to_ball_x / goal_to_ball_len
-        uy = goal_to_ball_y / goal_to_ball_len
-        standoff = min(LINEUP_BALL_DIST, max(0.25, goal_to_ball_len * 0.75))
-        target_world = (
-            ball_world[0] - ux * standoff,
-            ball_world[1] - uy * standoff
-        )
-
-        pose = self._robot_pose()
-        target_robot = _world_to_robot(target_world, pose)
-        face_world = math.atan2(
-            ball_world[1] - target_world[1],
-            ball_world[0] - target_world[0]
-        )
-        dtheta = _angle_norm(face_world - pose[2])
-
-        self._announce("Moving between goal and ball.", priority=True)
-        print("[LINEUP] goal={} ball={} target={} move=({:.2f}, {:.2f}, {:.2f})".format(
-            goal_world, ball_world, target_world, target_robot[0], target_robot[1], dtheta))
-        sys.stdout.flush()
-
-        try:
-            self.motion.moveTo(target_robot[0], target_robot[1], dtheta)
-        except Exception as e:
-            print("WARNING: geometric lineup move failed: {}".format(e))
-            return False
-
-        self._face_ball(timeout=2.0)
+        # Step 3: center head then face the ball so azimuth is in body frame.
+        self._center_head()
+        time.sleep(0.4)
+        self._face_ball(timeout=4.0)
         return True
 
     def _lineup(self):
         """Move between the goal and red ball, then wait for start signal."""
         self._set_game_state(GAME_LINEUP)
+        self._set_motion_state(S_WALKING)  # clear S_STOPPED so retry loop detects failure correctly
         # Stop the background scanner - goal calibration is done.
         try:
             self._stop_goal_scanner()
@@ -2013,17 +2046,9 @@ class Soccer1v1(object):
 
         ball_azi, ball_dist = ball_pos
 
-        # Estimate ball velocity (simple: compare to previous frame)
-        # If ball distance is changing significantly, it's moving
+        # Ball velocity disabled — angular-size distance is too noisy to produce
+        # stable delta signals; intercept prediction causes wave-pattern walking.
         self._ball_moving = False
-        if self._ball_pos_prev is not None:
-            prev_azi, prev_dist = self._ball_pos_prev
-            dist_delta = ball_dist - prev_dist
-            # If distance decreased rapidly, ball is moving toward us
-            # If distance stayed roughly same but azimuth changed, ball is rolling sideways
-            if abs(dist_delta) > 0.05:  # >5cm per frame = moving
-                self._ball_moving = True
-                self._ball_vel = (ball_azi - prev_azi, dist_delta)
         self._ball_pos_prev = ball_pos
 
         # KICK range (always highest priority when in range)
@@ -2132,12 +2157,19 @@ class Soccer1v1(object):
                 self._arc_sign *= -1
                 was_avoiding = False
 
-            if strategy in ("charge", "stalk", "search", "shoot"):
-                theta = max(-TURN_THETA, min(TURN_THETA, target_azi * 1.5))
+            if strategy == "shoot":
+                # Tight orbit around ball: lateral crabwalk + in-place turn, minimal forward.
+                # This keeps the robot orbiting the ball at close range to find shot angle.
+                face_correction = max(-0.4, min(0.4, target_azi * 1.2))
+                lateral = -0.25 * self._arc_sign
+                orbit_turn = 0.45 * self._arc_sign + face_correction
+                self.motion.moveToward(WALK_VX * 0.08, lateral, orbit_turn)
+            elif strategy in ("charge", "stalk", "search", "intercept"):
+                theta = max(-TURN_THETA, min(TURN_THETA, target_azi * 0.8))
+                self.motion.moveToward(target_speed, 0.0, theta)
             else:
                 theta = ARC_THETA * self._arc_sign
-
-            self.motion.moveToward(target_speed, 0.0, theta)
+                self.motion.moveToward(target_speed, 0.0, theta)
             time.sleep(POLL_SEC)
 
     #  Entry point 
@@ -2175,25 +2207,17 @@ class Soccer1v1(object):
                 self._announce("Calibration failed. Cannot proceed without goal detection.", priority=True)
                 return
 
-            max_lineup_attempts = int(os.environ.get("MAX_LINEUP_ATTEMPTS", "3"))
-            lineup_succeeded = False
-            for lineup_attempt in range(1, max_lineup_attempts + 1):
-                if not self._running:
-                    break
-                print("[LINEUP] attempt {} of {}".format(lineup_attempt, max_lineup_attempts))
+            lineup_attempt = 0
+            while self._running:
+                lineup_attempt += 1
+                print("[LINEUP] attempt {}".format(lineup_attempt))
                 sys.stdout.flush()
                 self._lineup()
                 if self._get_motion_state() == S_STOPPED:
-                    lineup_succeeded = True
                     break
                 print("[LINEUP] attempt {} failed; retrying...".format(lineup_attempt))
                 sys.stdout.flush()
                 time.sleep(1.0)
-            if not lineup_succeeded:
-                print("[LINEUP] all {} attempts failed. Aborting.".format(max_lineup_attempts))
-                sys.stdout.flush()
-                self._announce("Lineup failed completely.", priority=True)
-                return
             while self._running and self._get_motion_state() != S_WALKING:
                 time.sleep(0.5)
             self._set_game_state(GAME_PLAYING)
