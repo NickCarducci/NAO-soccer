@@ -32,6 +32,7 @@ import sys
 import time
 import threading
 import math
+import colorsys
 import subprocess
 import signal
 
@@ -47,6 +48,49 @@ except Exception:
     cv2 = None
     np = None
 
+
+class _PrefixedStream(object):
+    """Prefix each emitted line so multi-robot logs remain readable."""
+
+    def __init__(self, stream, prefix):
+        self._stream = stream
+        self._prefix = prefix
+        self._at_line_start = True
+
+    def write(self, data):
+        if data is None:
+            return
+        text = str(data)
+        if not text:
+            return
+        for part in text.splitlines(True):
+            if self._at_line_start:
+                self._stream.write(self._prefix)
+                self._at_line_start = False
+            self._stream.write(part)
+            if part.endswith("\n"):
+                self._at_line_start = True
+
+    def flush(self):
+        self._stream.flush()
+
+    def isatty(self):
+        try:
+            return self._stream.isatty()
+        except Exception:
+            return False
+
+    def fileno(self):
+        return self._stream.fileno()
+
+
+def _install_robot_log_prefix(robot_id, robot_name):
+    prefix = "[R{}:{}] ".format(robot_id, robot_name)
+    if not isinstance(sys.stdout, _PrefixedStream):
+        sys.stdout = _PrefixedStream(sys.stdout, prefix)
+    if not isinstance(sys.stderr, _PrefixedStream):
+        sys.stderr = _PrefixedStream(sys.stderr, prefix)
+
 # Connection
 ROBOT_NAMES = {
     1: "Suarez",
@@ -54,8 +98,8 @@ ROBOT_NAMES = {
 }
 
 ROBOT_IPS = {
-    1: "172.16.0.29",
-    2: "172.16.0.6",
+    1: "172.16.0.4",
+    2: "172.16.0.29",
 }
 
 def _launch_both_players():
@@ -85,7 +129,9 @@ def _launch_both_players():
         while True:
             running = [p for p in children if p.poll() is None]
             if not running:
-                return max([p.returncode or 0 for p in children])
+                # All children exited
+                exit_codes = [p.returncode or 0 for p in children]
+                return max(exit_codes) if exit_codes else 0
             time.sleep(0.5)
     except KeyboardInterrupt:
         print("\nStopping both 1v1 controllers...")
@@ -162,15 +208,21 @@ GOAL_CAMERAS = [
 ]
 GOAL_SCAN_SECONDS = float(os.environ.get("GOAL_SCAN_SECONDS", "6.0"))
 LINEUP_BALL_DIST = float(os.environ.get("LINEUP_BALL_DIST", "1.10"))
-LINEUP_BALL_TIMEOUT = float(os.environ.get("LINEUP_BALL_TIMEOUT", "10.0"))
+LINEUP_BALL_TIMEOUT = float(os.environ.get("LINEUP_BALL_TIMEOUT", "25.0"))
+BALL_SCAN_CYCLES = int(os.environ.get("BALL_SCAN_CYCLES", "4"))
+BALL_SCAN_SECONDS = float(os.environ.get("BALL_SCAN_SECONDS", "18.0"))
+BALL_HEAD_PITCH = float(os.environ.get("BALL_HEAD_PITCH", "0.4"))
+BALL_CONFIRM_HITS = int(os.environ.get("BALL_CONFIRM_HITS", "1"))
 FULL_SCAN_STEPS = int(os.environ.get("FULL_SCAN_STEPS", "3"))
-GOAL_HEAD_PITCH = float(os.environ.get("GOAL_HEAD_PITCH", "-0.5"))
+GOAL_HEAD_PITCH = float(os.environ.get("GOAL_HEAD_PITCH", "0.3"))
+GOAL_PHYSICAL_WIDTH_M = float(os.environ.get("GOAL_PHYSICAL_WIDTH_M", "0.91"))
 
 # ALColorBlobDetection tracks one RGB target color at a time.
+# Neon yellow from Walmart soccer net
 GOAL_YELLOW_RGB = (
-    int(os.environ.get("GOAL_YELLOW_R", "230")),
-    int(os.environ.get("GOAL_YELLOW_G", "255")),
-    int(os.environ.get("GOAL_YELLOW_B", "0")),
+    int(os.environ.get("GOAL_YELLOW_R", "255")),  # red channel
+    int(os.environ.get("GOAL_YELLOW_G", "255")),  # green channel
+    int(os.environ.get("GOAL_YELLOW_B", "0")),    # blue channel (0 for yellow)
 )
 ROBOT_WHITE_RGB = (
     int(os.environ.get("ROBOT_WHITE_R", "245")),
@@ -178,25 +230,40 @@ ROBOT_WHITE_RGB = (
     int(os.environ.get("ROBOT_WHITE_B", "245")),
 )
 RED_BALL_RGB = (
-    int(os.environ.get("RED_BALL_R", "220")),
-    int(os.environ.get("RED_BALL_G", "40")),
-    int(os.environ.get("RED_BALL_B", "0")),
+    int(os.environ.get("RED_BALL_R", "242")),
+    int(os.environ.get("RED_BALL_G", "90")),
+    int(os.environ.get("RED_BALL_B", "77")),
 )
-COLOR_THRESHOLD = int(os.environ.get("COLOR_THRESHOLD", "120"))
-GOAL_MIN_SIZE = int(os.environ.get("GOAL_MIN_SIZE", "50"))
+COLOR_THRESHOLD = int(os.environ.get("COLOR_THRESHOLD", "30"))   # threshold for neon yellow specificity
+GOAL_MIN_SIZE = int(os.environ.get("GOAL_MIN_SIZE", "10"))  # minimum blob size to filter noise
 ROBOT_MIN_SIZE = int(os.environ.get("ROBOT_MIN_SIZE", "80"))
 RED_BALL_MIN_SIZE = int(os.environ.get("RED_BALL_MIN_SIZE", "80"))
+GOAL_MIN_RGB_CLUSTER_PIXELS = int(os.environ.get("GOAL_MIN_RGB_CLUSTER_PIXELS", "4"))
+GOAL_MIN_RGB_BOX_AREA = float(os.environ.get("GOAL_MIN_RGB_BOX_AREA", "80.0"))
+GOAL_MIN_RGB_ASPECT = float(os.environ.get("GOAL_MIN_RGB_ASPECT", "0.35"))
+GOAL_MAX_RGB_EST_DIST = float(os.environ.get("GOAL_MAX_RGB_EST_DIST", "12.0"))
+GOAL_MIN_YELLOW_DENSITY = float(os.environ.get("GOAL_MIN_YELLOW_DENSITY", "0.03"))
+GOAL_USE_MESH_BONUS = int(os.environ.get("GOAL_USE_MESH_BONUS", "0"))
+GOAL_MIN_CONFIRM_SAMPLES = int(os.environ.get("GOAL_MIN_CONFIRM_SAMPLES", "2"))
+GOAL_WORLD_CLUSTER_TOL = float(os.environ.get("GOAL_WORLD_CLUSTER_TOL", "1.0"))
 GOAL_DEBUG = int(os.environ.get("GOAL_DEBUG", "1"))
-YELLOW_HSV_LOWER = np.array([
+GOAL_VERBOSE_REJECTS = int(os.environ.get("GOAL_VERBOSE_REJECTS", "0"))
+GOAL_LOG_THROTTLE_SEC = float(os.environ.get("GOAL_LOG_THROTTLE_SEC", "1.5"))
+CALIB_VERBOSE_YAW = int(os.environ.get("CALIB_VERBOSE_YAW", "0"))
+YELLOW_HSV_LOWER_VALUES = (
     int(os.environ.get("GOAL_HSV_H_LOW", "40")),
     int(os.environ.get("GOAL_HSV_S_LOW", "100")),
     int(os.environ.get("GOAL_HSV_V_LOW", "100")),
-]) if np is not None else None
-YELLOW_HSV_UPPER = np.array([
+)
+YELLOW_HSV_UPPER_VALUES = (
     int(os.environ.get("GOAL_HSV_H_HIGH", "70")),
     int(os.environ.get("GOAL_HSV_S_HIGH", "255")),
     int(os.environ.get("GOAL_HSV_V_HIGH", "255")),
-]) if np is not None else None
+)
+BLACK_MESH_S_MAX = int(os.environ.get("GOAL_BLACK_S_MAX", "90"))
+BLACK_MESH_V_MAX = int(os.environ.get("GOAL_BLACK_V_MAX", "80"))
+YELLOW_HSV_LOWER = np.array(list(YELLOW_HSV_LOWER_VALUES)) if np is not None else YELLOW_HSV_LOWER_VALUES
+YELLOW_HSV_UPPER = np.array(list(YELLOW_HSV_UPPER_VALUES)) if np is not None else YELLOW_HSV_UPPER_VALUES
 VIDEO_RESOLUTION = 2       # VGA, 640x480
 VIDEO_COLORSPACE_RGB = 11  # kRGBColorSpace
 VIDEO_FPS = 10
@@ -256,6 +323,7 @@ def _world_to_robot(point, pose):
 class Soccer1v1(object):
 
     def __init__(self):
+        _install_robot_log_prefix(ROBOT_ID, ROBOT_NAME)
         self._motion_state  = S_STOPPED
         self._game_state    = GAME_INIT
         self._lock          = threading.Lock()
@@ -271,6 +339,19 @@ class Soccer1v1(object):
         self._last_goal_debug = 0
         self._active_camera = GOAL_CAMERA
         self._video_clients = {}
+        self._opencv_available = (cv2 is not None and np is not None)
+        self._opencv_unavailable_logged = False
+        self._throttled_log_times = {}
+        self._rgb_stats = {
+            "frames": 0,
+            "no_yellow": 0,
+            "clusters": 0,
+            "accept": 0,
+            "reject_size": 0,
+            "reject_shape": 0,
+            "reject_score": 0,
+            "reject_dist": 0,
+        }
 
         # Background scanner for non-blocking goal detection
         self._scanner_thread = None
@@ -411,6 +492,9 @@ class Soccer1v1(object):
         if diag_enabled:
             print("[DIAG] DUMP_ALMEMORY_KEYS=1 enabled")
             sys.stdout.flush()
+        else:
+            print("[DIAG] ALMemory probe disabled (set DUMP_ALMEMORY_KEYS=1 to enable)")
+            sys.stdout.flush()
         try:
             self.color_blob = ALProxy("ALColorBlobDetection", ROBOT_IP, ROBOT_PORT)
             try:
@@ -473,6 +557,7 @@ class Soccer1v1(object):
         except Exception:
             pass
         try:
+            self.motion.stopMove()
             self.posture.goToPosture("Stand", 0.5)
         except Exception:
             pass
@@ -507,8 +592,30 @@ class Soccer1v1(object):
         self._last_callout = now
         try:
             self.tts.post.say(msg)
-        except Exception:
-            pass
+        except Exception as e:
+            print("[TTS][ID {}] post.say failed: {}".format(ROBOT_ID, e))
+            sys.stdout.flush()
+            try:
+                self.tts.say(msg)
+            except Exception as e2:
+                print("[TTS][ID {}] say failed: {}".format(ROBOT_ID, e2))
+                sys.stdout.flush()
+
+    def _log_ignored_exception(self, label, exc=None):
+        if exc is None:
+            print("[WARN][ID {}] {}".format(ROBOT_ID, label))
+        else:
+            print("[WARN][ID {}] {}: {}".format(ROBOT_ID, label, exc))
+        sys.stdout.flush()
+
+    def _log_throttled(self, key, message, min_interval=1.0):
+        now = time.time()
+        last = self._throttled_log_times.get(key, 0.0)
+        if now - last < min_interval:
+            return
+        self._throttled_log_times[key] = now
+        print(message)
+        sys.stdout.flush()
 
     #  Sensors 
 
@@ -524,7 +631,21 @@ class Soccer1v1(object):
 
     def _read_ball(self):
         """Returns (azimuth_rad, distance_m) or None."""
-        # Try ALRedBallDetection first
+        # During lineup, prefer the red blob path because the ball is large enough
+        # to be stable in color space even when the built-in detector is noisy.
+        if self._get_game_state() == GAME_LINEUP:
+            try:
+                result = self._detect_red_ball_blob()
+                if result is not None:
+                    if not self._ball_visible:
+                        print("[BALL] detected via color blob")
+                        self._ball_visible = True
+                    self._ball_miss_count = 0
+                    return result
+            except Exception:
+                pass
+
+        # Try ALRedBallDetection first outside lineup
         try:
             data = self.memory.getData("redBallDetected")
             if data and len(data) > 1 and len(data[1]) > 0:
@@ -536,9 +657,7 @@ class Soccer1v1(object):
                 return float(b[0]), float(b[2])
         except Exception:
             pass
-        # Blob fallback only during lineup - during gameplay the vision thread
-        # owns the blob detector for opponent detection, so switching here
-        # would cause constant thrashing.
+        # Blob fallback during lineup when ALRedBallDetection did not return.
         if self._get_game_state() == GAME_LINEUP:
             try:
                 result = self._detect_red_ball_blob()
@@ -597,21 +716,49 @@ class Soccer1v1(object):
 
     def _store_goal_world_points(self, goals):
         pose = self._robot_pose()
-        points = []
         for goal in goals:
             if len(goal) >= 5:
+                area = float(goal[2])
                 x_ang, dist = float(goal[3]), float(goal[4])
-                points.append(_robot_to_world(_polar_to_xy(x_ang, dist), pose))
-        if points:
-            self._goal_points_world = points
+                if dist <= 0.05 or dist > GOAL_MAX_RGB_EST_DIST:
+                    continue
+                point = _robot_to_world(_polar_to_xy(x_ang, dist), pose)
+                self._goal_candidates_world.append((dist, area, point))
 
     def _select_nearest_goal_world_point(self):
         if not self._goal_candidates_world:
             return False
-        dist, area, point = min(self._goal_candidates_world, key=lambda g: g[0])
-        self._goal_points_world = [point]
-        print("[GOAL] selected nearest candidate dist={:.2f} area={:.0f} point=({:.2f}, {:.2f}) from {} samples".format(
-            dist, area, point[0], point[1], len(self._goal_candidates_world)))
+
+        # Require repeated detections from the same world-space neighborhood
+        # before locking to avoid one-off yellow false positives.
+        best_cluster = None
+        for i in range(len(self._goal_candidates_world)):
+            _, _, p0 = self._goal_candidates_world[i]
+            cluster = []
+            for candidate in self._goal_candidates_world:
+                dist, area, p = candidate
+                if math.hypot(p[0] - p0[0], p[1] - p0[1]) <= GOAL_WORLD_CLUSTER_TOL:
+                    cluster.append(candidate)
+            if best_cluster is None or len(cluster) > len(best_cluster):
+                best_cluster = cluster
+
+        if best_cluster is None or len(best_cluster) < GOAL_MIN_CONFIRM_SAMPLES:
+            if GOAL_DEBUG:
+                print("[GOAL] candidate cluster too weak: best_cluster={} required={} total_samples={}".format(
+                    0 if best_cluster is None else len(best_cluster),
+                    GOAL_MIN_CONFIRM_SAMPLES,
+                    len(self._goal_candidates_world)))
+                sys.stdout.flush()
+            return False
+
+        avg_x = sum(c[2][0] for c in best_cluster) / float(len(best_cluster))
+        avg_y = sum(c[2][1] for c in best_cluster) / float(len(best_cluster))
+        avg_dist = sum(c[0] for c in best_cluster) / float(len(best_cluster))
+        max_area = max(c[1] for c in best_cluster)
+
+        self._goal_points_world = [(avg_x, avg_y)]
+        print("[GOAL] selected stable cluster dist~{:.2f} area_max={:.0f} point=({:.2f}, {:.2f}) cluster_size={} of {} samples".format(
+            avg_dist, max_area, avg_x, avg_y, len(best_cluster), len(self._goal_candidates_world)))
         sys.stdout.flush()
         return True
 
@@ -623,32 +770,44 @@ class Soccer1v1(object):
         return x, y
 
     def _setup_goal_blob_detection(self):
-        """Configure ALTracker color blob detection for neon-yellow goals.
-        On this firmware ALColorBlobDetection routes through ALTracker and
-        publishes to ALTracker/ColorBlobDetected, not ColorBlobDetection/blobs.
-        """
+        """Configure ALColorBlobDetection for neon-yellow goals (same abstraction as robot/ball)."""
         try:
             if self._color_blob_mode == "goal":
                 return
             try:
-                self.tracker.stopTracker()
+                self.color_blob.setColorSpace(0)
             except Exception:
                 pass
-            # addTarget("ColorBlob", [r, g, b, threshold, minSize])
-            self.tracker.addTarget("ColorBlob", [
-                float(GOAL_YELLOW_RGB[0]),
-                float(GOAL_YELLOW_RGB[1]),
-                float(GOAL_YELLOW_RGB[2]),
-                float(COLOR_THRESHOLD),
-                float(GOAL_MIN_SIZE)
-            ])
-            self.tracker.setMode("None")  # detect only, don't move robot
-            self.tracker.track("ColorBlob")
+            self.color_blob.setColor(
+                GOAL_YELLOW_RGB[0],
+                GOAL_YELLOW_RGB[1],
+                GOAL_YELLOW_RGB[2],
+                COLOR_THRESHOLD
+            )
+            self.color_blob.setObjectProperties(GOAL_MIN_SIZE, 0.5, "Unknown")
+            try:
+                self.color_blob.setAutoExposure(True)
+            except Exception:
+                pass
+            try:
+                self.tracker.addTarget("ColorBlob", [
+                    GOAL_YELLOW_RGB[0],
+                    GOAL_YELLOW_RGB[1],
+                    GOAL_YELLOW_RGB[2],
+                    COLOR_THRESHOLD,
+                    GOAL_MIN_SIZE,
+                ])
+                self.tracker.track("ColorBlob")
+                print("[VISION] ALTracker tracking ColorBlob target")
+            except Exception as e:
+                print("[VISION] tracker ColorBlob activation failed: {}".format(e))
             self._color_blob_mode = "goal"
-            print("[VISION] ALTracker color blob: neon yellow rgb={} threshold={}".format(
+            print("[VISION] Color blob target: neon yellow goals rgb={} threshold={}".format(
                 GOAL_YELLOW_RGB, COLOR_THRESHOLD))
+            sys.stdout.flush()
         except Exception as e:
             print("WARNING: goal blob setup failed: {}".format(e))
+            sys.stdout.flush()
 
     def _debug_goal_blobs(self, blobs, accepted, rejected):
         if not GOAL_DEBUG:
@@ -729,10 +888,16 @@ class Soccer1v1(object):
     def _read_color_blobs(self):
         try:
             data = self.memory.getData("ALTracker/ColorBlobDetected")
+            if GOAL_DEBUG and data:
+                print("[GOAL] _read_color_blobs got data: type={} len={} first_elem_type={}".format(
+                    type(data), len(data), type(data[0]) if len(data) > 0 else "N/A"))
+                sys.stdout.flush()
             if data:
                 return data
-        except Exception:
-            pass
+        except Exception as e:
+            if GOAL_DEBUG:
+                print("[GOAL] _read_color_blobs exception: {}".format(e))
+                sys.stdout.flush()
         return []
 
     def _dump_color_blob_diagnostics(self):
@@ -766,7 +931,9 @@ class Soccer1v1(object):
         # Try ALMemory inspection helpers (these may or may not exist)
         try:
             get_list_fn = getattr(self.memory, 'getDataListRegisteredInModule', None)
-            if get_list_fn is not None:
+            if get_list_fn is None:
+                print("[DIAG] getDataListRegisteredInModule unavailable on this NAOqi build; skipping")
+            else:
                 for mod in (COLOR_BLOB_SUBSCRIPTION, 'ALColorBlobDetection', 'ColorBlobDetection', SUBSCRIPTION):
                     try:
                         keys = get_list_fn(mod)
@@ -774,10 +941,11 @@ class Soccer1v1(object):
                         if keys:
                             filtered = [k for k in keys if 'Color' in k or 'color' in k or 'Blob' in k]
                             print("[DIAG]   filtered: {}".format(filtered[:50]))
-                    except Exception as e:
-                        print("[DIAG] getDataListRegisteredInModule({}) failed: {}".format(mod, e))
-        except Exception as e:
-            print("[DIAG] ALMemory module-list probe failed: {}".format(e))
+                    except Exception:
+                        # Method exists but this module isn't introspectable on this firmware.
+                        pass
+        except Exception:
+            pass
         sys.stdout.flush()
 
         # getDataList on this firmware takes a string filter; so, use it to find real keys
@@ -798,10 +966,14 @@ class Soccer1v1(object):
             for method in ('getObjectList', 'getBlobList', 'getOutput',
                            'getBlobs', 'getNearestObject', 'getResult'):
                 try:
-                    result = getattr(color_blob, method)()
+                    fn = getattr(color_blob, method, None)
+                    if fn is None:
+                        continue
+                    result = fn()
                     print("[DIAG] color_blob.{}() -> {}".format(method, result))
-                except Exception as e:
-                    print("[DIAG] color_blob.{}() failed: {}".format(method, e))
+                except Exception:
+                    # Skip unsupported proxy methods silently to keep logs actionable.
+                    pass
         sys.stdout.flush()
 
         # Probe known key variants
@@ -841,7 +1013,35 @@ class Soccer1v1(object):
         frame = self._capture_hsv_frame(camera_id)
         if frame is None:
             return []
+        
+        # Check if HSV thresholds are available
+        if YELLOW_HSV_LOWER is None or YELLOW_HSV_UPPER is None:
+            return []
+        
+        # Debug: sample HSV values from center of frame
+        if GOAL_DEBUG and frame is not None and len(frame.shape) == 3:
+            center_y, center_x = frame.shape[0] // 2, frame.shape[1] // 2
+            sample_h = int(frame[center_y, center_x, 0])
+            sample_s = int(frame[center_y, center_x, 1])
+            sample_v = int(frame[center_y, center_x, 2])
+            print("[GOAL] center pixel HSV=({}, {}, {}) camera={}".format(sample_h, sample_s, sample_v, camera_id))
+            sys.stdout.flush()
+        
         mask = cv2.inRange(frame, YELLOW_HSV_LOWER, YELLOW_HSV_UPPER)
+        
+        # Save debug frame if requested
+        debug_dir = os.environ.get("GOAL_DEBUG_FRAMES")
+        if debug_dir:
+            try:
+                import time as time_module
+                ts = int(time_module.time() * 1000) % 100000
+                cv2.imwrite("{}/mask_{}_c{}.png".format(debug_dir, ts, camera_id), mask)
+                bgr_frame = cv2.cvtColor(frame, cv2.COLOR_HSV2BGR)
+                cv2.imwrite("{}/frame_{}_c{}.png".format(debug_dir, ts, camera_id), bgr_frame)
+            except Exception as e:
+                if GOAL_DEBUG:
+                    print("[GOAL] frame save failed: {}".format(e))
+        
         found = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         contours = found[0] if len(found) == 2 else found[1]
 
@@ -860,9 +1060,209 @@ class Soccer1v1(object):
             goals.append((cx, cy, area, x_ang, 0.0))
 
         if GOAL_DEBUG:
-            print("[GOAL] frame camera={} candidates={}".format(camera_id, len(goals)))
+            mask_white = cv2.countNonZero(mask)
+            print("[GOAL] frame camera={} mask_pixels={} contours={} candidates={}".format(
+                camera_id, mask_white, len(contours), len(goals)))
             sys.stdout.flush()
         return sorted(goals, key=lambda g: g[0])
+
+    def _detect_goals_from_rgb_frame(self, camera_id):
+        try:
+            self._rgb_stats["frames"] += 1
+            client = self._video_client_for_camera(camera_id)
+            result = None
+            for _ in range(2):
+                result = self.video.getImageRemote(client)
+                if result is not None and len(result) >= 7 and result[6] is not None:
+                    break
+                time.sleep(0.05)
+            if result is None or len(result) < 7 or result[6] is None:
+                if GOAL_DEBUG:
+                    print("[GOAL] RGB fallback camera={} missing image buffer".format(camera_id))
+                    sys.stdout.flush()
+                return []
+            width, height, channels, img_buffer = (
+                result[0], result[1], result[2], result[6])
+            if channels != 3:
+                return []
+            if img_buffer is None:
+                if GOAL_DEBUG:
+                    print("[GOAL] RGB fallback camera={} returned None buffer".format(camera_id))
+                    sys.stdout.flush()
+                return []
+            try:
+                img_buffer = bytearray(img_buffer)
+            except Exception:
+                if GOAL_DEBUG:
+                    print("[GOAL] RGB fallback camera={} could not normalize buffer".format(camera_id))
+                    sys.stdout.flush()
+                return []
+
+            # Pure-Python HSV test that matches the configured yellow thresholds.
+            goal_pixels = []
+            black_pixels = []
+            step = 4
+            hsv_low = YELLOW_HSV_LOWER
+            hsv_high = YELLOW_HSV_UPPER
+            sampled_pixels = 0
+            for y in range(0, height, step):
+                row_offset = y * width * channels
+                for x in range(0, width, step):
+                    offset = row_offset + x * channels
+                    r = ord(img_buffer[offset]) if isinstance(img_buffer[offset], str) else img_buffer[offset]
+                    g = ord(img_buffer[offset + 1]) if isinstance(img_buffer[offset + 1], str) else img_buffer[offset + 1]
+                    b = ord(img_buffer[offset + 2]) if isinstance(img_buffer[offset + 2], str) else img_buffer[offset + 2]
+                    sampled_pixels += 1
+                    h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
+                    h = int(h * 179.0)
+                    s = int(s * 255.0)
+                    v = int(v * 255.0)
+                    if (hsv_low[0] <= h <= hsv_high[0] and
+                            hsv_low[1] <= s <= hsv_high[1] and
+                            hsv_low[2] <= v <= hsv_high[2]):
+                        goal_pixels.append((x, y))
+                    elif s <= BLACK_MESH_S_MAX and v <= BLACK_MESH_V_MAX:
+                        black_pixels.append((x, y))
+
+            if not goal_pixels:
+                self._rgb_stats["no_yellow"] += 1
+                if GOAL_DEBUG:
+                    self._log_throttled(
+                        "rgb_no_yellow_cam{}".format(camera_id),
+                        "[GOAL] RGB fallback camera={} found no yellow pixels out of {} samples".format(
+                            camera_id, sampled_pixels),
+                        min_interval=GOAL_LOG_THROTTLE_SEC)
+                return []
+
+            neighbor_limit = step * 3
+            clusters = []
+            remaining = list(goal_pixels)
+            while remaining:
+                seed = remaining.pop()
+                cluster = [seed]
+                expanded = True
+                while expanded:
+                    expanded = False
+                    still_remaining = []
+                    for point in remaining:
+                        close = False
+                        for cluster_point in cluster:
+                            if (abs(point[0] - cluster_point[0]) <= neighbor_limit and
+                                    abs(point[1] - cluster_point[1]) <= neighbor_limit):
+                                close = True
+                                break
+                        if close:
+                            cluster.append(point)
+                            expanded = True
+                        else:
+                            still_remaining.append(point)
+                    remaining = still_remaining
+                clusters.append(cluster)
+            self._rgb_stats["clusters"] += len(clusters)
+
+            best_candidate = None
+            reject_shape = 0
+            reject_size = 0
+            reject_score = 0
+            reject_dist = 0
+            for cluster in clusters:
+                xs = [p[0] for p in cluster]
+                ys = [p[1] for p in cluster]
+                min_x, max_x = min(xs), max(xs)
+                min_y, max_y = min(ys), max(ys)
+                cx = int((min_x + max_x) / 2.0)
+                cy = int((min_y + max_y) / 2.0)
+                box_w = max_x - min_x + step
+                box_h = max_y - min_y + step
+                if box_w < 12 or box_h < 8:
+                    reject_size += 1
+                    continue
+                area = float(box_w * box_h)
+                sample_cols = max(1, int(math.ceil(float(box_w) / float(step))))
+                sample_rows = max(1, int(math.ceil(float(box_h) / float(step))))
+                box_samples = float(sample_cols * sample_rows)
+                yellow_density = float(len(cluster)) / box_samples
+                black_in_box = 0
+                for bx, by in black_pixels:
+                    if min_x - step <= bx <= max_x + step and min_y - step <= by <= max_y + step:
+                        black_in_box += 1
+                black_density = float(black_in_box) / box_samples
+                edge_pixels = 0
+                inner_pixels = 0
+                for px, py in cluster:
+                    if (px <= min_x + step or px >= max_x - step or
+                            py <= min_y + step or py >= max_y - step):
+                        edge_pixels += 1
+                    else:
+                        inner_pixels += 1
+                edge_ratio = float(edge_pixels) / float(max(1, len(cluster)))
+                x_ang = ((float(cx) - CAMERA_RES_W / 2.0) /
+                         (CAMERA_RES_W / 2.0)) * (CAMERA_FOV_H / 2.0)
+                ang_width = max(math.radians(1.0), (float(box_w) / CAMERA_RES_W) * CAMERA_FOV_H)
+                est_dist = GOAL_PHYSICAL_WIDTH_M / (2.0 * math.tan(ang_width / 2.0))
+                if GOAL_DEBUG and (
+                        len(cluster) >= max(6, GOAL_MIN_RGB_CLUSTER_PIXELS - 2) and
+                        area >= (GOAL_MIN_RGB_BOX_AREA * 0.75) and
+                        est_dist <= 12.0):
+                    self._log_throttled(
+                        "rgb_cluster_cam{}".format(camera_id),
+                        "[GOAL] RGB cluster cam={} yellow={} black={} edge={:.2f} density={:.3f}/{:.3f} box=({}, {}) size=({}, {}) est_dist={:.2f}".format(
+                            camera_id, len(cluster), black_in_box, edge_ratio, yellow_density,
+                            black_density, cx, cy, box_w, box_h, est_dist),
+                        min_interval=0.25)
+                aspect = float(box_w) / float(max(1, box_h))
+                if len(cluster) < GOAL_MIN_RGB_CLUSTER_PIXELS or area < GOAL_MIN_RGB_BOX_AREA:
+                    reject_size += 1
+                    continue
+                if aspect < GOAL_MIN_RGB_ASPECT:
+                    reject_shape += 1
+                    continue
+                required_yellow_density = GOAL_MIN_YELLOW_DENSITY
+                # Thin yellow rims can enclose mostly dark interiors. Treat dark fill
+                # as a soft relaxation signal, not a hard requirement.
+                if black_density >= 0.20:
+                    required_yellow_density *= 0.60
+                if edge_ratio >= 0.65:
+                    required_yellow_density *= 0.80
+                required_yellow_density = max(0.01, required_yellow_density)
+                if yellow_density < required_yellow_density:
+                    reject_score += 1
+                    continue
+                if not (0.25 <= est_dist <= GOAL_MAX_RGB_EST_DIST):
+                    reject_dist += 1
+                    continue
+
+                candidate = (cx, cy, area, x_ang, est_dist)
+                if best_candidate is None or len(cluster) > best_candidate[0]:
+                    best_candidate = (len(cluster), candidate)
+
+            self._rgb_stats["reject_size"] += reject_size
+            self._rgb_stats["reject_shape"] += reject_shape
+            self._rgb_stats["reject_score"] += reject_score
+            self._rgb_stats["reject_dist"] += reject_dist
+
+            if best_candidate is not None:
+                self._rgb_stats["accept"] += 1
+                if GOAL_DEBUG:
+                    c = best_candidate[1]
+                    self._log_throttled(
+                        "rgb_accept_cam{}".format(camera_id),
+                        "[GOAL] RGB accepted candidate cam={} center=({}, {}) area={:.0f} azi={:.2f} dist={:.2f} clusters={} rejects(s={},sh={},sc={},d={})".format(
+                            camera_id, int(c[0]), int(c[1]), float(c[2]), float(c[3]), float(c[4]),
+                            len(clusters), reject_size, reject_shape, reject_score, reject_dist),
+                        min_interval=0.5)
+                return [best_candidate[1]]
+            if GOAL_DEBUG and GOAL_VERBOSE_REJECTS and clusters:
+                self._log_throttled(
+                    "rgb_reject_cam{}".format(camera_id),
+                    "[GOAL] RGB saw {} yellow clusters on cam{} but accepted none; rejects(s={},sh={},sc={},d={})".format(
+                        len(clusters), camera_id, reject_size, reject_shape, reject_score, reject_dist),
+                    min_interval=GOAL_LOG_THROTTLE_SEC)
+        except Exception as e:
+            if GOAL_DEBUG:
+                print("[GOAL] RGB fallback failed: {}".format(e))
+                sys.stdout.flush()
+        return []
 
     def _detect_red_ball_blob(self):
         try:
@@ -920,16 +1320,43 @@ class Soccer1v1(object):
         try:
             self._setup_goal_blob_detection()
             data = self._read_color_blobs()
-            if not data or not isinstance(data[0], list) or len(data[0]) < 3:
+            if not data:
+                if GOAL_DEBUG:
+                    self._log_throttled(
+                        "no_almemory_blobs",
+                        "[GOAL] no ALMemory blobs; trying RGB frame fallback",
+                        min_interval=GOAL_LOG_THROTTLE_SEC)
+                for camera_id in GOAL_CAMERAS:
+                    goals = self._detect_goals_from_rgb_frame(camera_id)
+                    if goals:
+                        return goals
+                return []
+            if GOAL_DEBUG:
+                print("[GOAL] raw blob data: {} elements, type={}".format(len(data), type(data)))
+                if len(data) > 0:
+                    print("[GOAL]   data[0]={}, type={}".format(data[0], type(data[0])))
+                sys.stdout.flush()
+            if not isinstance(data[0], list) or len(data[0]) < 3:
                 return []
             pos = data[0]  # use raw (not filtered) position
             x, y, z = float(pos[0]), float(pos[1]), float(pos[2])
             dist = math.sqrt(x*x + y*y + z*z)
             x_ang = math.atan2(y, x)
             angular_size = float(pos[4]) if len(pos) > 4 else 0.1
+            if GOAL_DEBUG:
+                print("[GOAL] parsed: x={:.3f} y={:.3f} z={:.3f} dist={:.3f} azi={:.3f} size={:.3f}".format(
+                    x, y, z, dist, x_ang, angular_size))
+                sys.stdout.flush()
             if 0.1 < dist < 8.0:
                 cx = int((x_ang / CAMERA_FOV_H + 0.5) * CAMERA_RES_W)
+                if GOAL_DEBUG:
+                    print("[GOAL] VALID: dist in range, returning detection")
+                    sys.stdout.flush()
                 return [(cx, 240, angular_size * 1000, x_ang, dist)]
+            else:
+                if GOAL_DEBUG:
+                    print("[GOAL] REJECTED: dist {:.3f} outside range [0.1, 8.0]".format(dist))
+                    sys.stdout.flush()
             return []
         except Exception as e:
             print("[GOAL] parse error: {}".format(e))
@@ -1094,9 +1521,9 @@ class Soccer1v1(object):
                         self._goal_right = goals[-1][:2]
                     elif len(goals) == 1:
                         self._store_goal_world_points(goals)
-                        cx, cy, area, x_ang, dist = goals[0]
-                        self._goal_left = (640 - cx, cy)
-                        self._goal_right = (cx, cy)
+                        if GOAL_DEBUG:
+                            print("[GOAL] ignoring single goal blob until a second stable goal is found")
+                            sys.stdout.flush()
                 self._wall_detected = self._detect_wall_edge()
             except Exception:
                 pass
@@ -1175,23 +1602,110 @@ class Soccer1v1(object):
         faces all directions including its own goal.
         """
         self._announce("Scanning for goals.", priority=True)
-        # Tilt head down; the goal rim is near ground level
-        self._set_head_pitch(0.3)
+        if YELLOW_HSV_LOWER is not None and YELLOW_HSV_UPPER is not None:
+            print("[CALIB] HSV range: H=[{}-{}], S=[{}-{}], V=[{}-{}]".format(
+                YELLOW_HSV_LOWER[0], YELLOW_HSV_UPPER[0],
+                YELLOW_HSV_LOWER[1], YELLOW_HSV_UPPER[1],
+                YELLOW_HSV_LOWER[2], YELLOW_HSV_UPPER[2]))
+        print("[CALIB] RGB target: {}".format(GOAL_YELLOW_RGB))
+        print("[CALIB] OpenCV HSV fallback available: {}".format(self._opencv_available))
+        if not self._opencv_available and not self._opencv_unavailable_logged:
+            print("[CALIB] OpenCV/numpy unavailable on this robot runtime; skipping HSV frame fallback attempts")
+            self._opencv_unavailable_logged = True
+        # Probe ALMemory for tracker-related keys
+        try:
+            for prefix in ("ALTracker", "ColorBlob", "color"):
+                keys = self.memory.getDataList(prefix)
+                if keys:
+                    print("[CALIB] ALMemory keys starting with '{}': {}".format(prefix, keys[:5]))
+        except Exception as e:
+            print("[CALIB] ALMemory key probe failed: {}".format(e))
+        sys.stdout.flush()
+        # Keep a fixed downward pitch while scanning yellow goal blobs.
+        self._set_head_pitch(GOAL_HEAD_PITCH)
         time.sleep(0.3)
 
         for step in range(4):
             print("[CALIB] sweep {} of 4".format(step + 1))
             sys.stdout.flush()
+            self._rgb_stats = {
+                "frames": 0,
+                "no_yellow": 0,
+                "clusters": 0,
+                "accept": 0,
+                "reject_size": 0,
+                "reject_shape": 0,
+                "reject_score": 0,
+                "reject_dist": 0,
+            }
+            yaw_hits = 0
+            yaw_misses = 0
             for yaw in HEAD_SCAN_YAWS:
                 if not self._running:
                     break
                 self._set_head_yaw(yaw)
                 time.sleep(0.35)
-                if self._goal_left and self._goal_right:
-                    self.motion.stopMove()
-                    self._center_head()
-                    self._announce("Goals locked.", priority=True)
-                    return True
+                
+                # Check if blob data exists in ALMemory
+                raw_data = self.memory.getData("ALTracker/ColorBlobDetected")
+                if CALIB_VERBOSE_YAW:
+                    print("[CALIB] yaw={:.1f} raw_data_exists={}".format(yaw, raw_data is not None and len(raw_data) > 0 if isinstance(raw_data, list) else raw_data is not None))
+                    sys.stdout.flush()
+                
+                # Try ALTracker blob detection first
+                goals = self._detect_goals()
+                if goals:
+                    yaw_hits += 1
+                    print("[CALIB] found {} goals via ALTracker".format(len(goals)))
+                    sys.stdout.flush()
+                    self._store_goal_world_points(goals)
+                    if len(self._goal_candidates_world) >= 2 and self._select_nearest_goal_world_point():
+                        self.motion.stopMove()
+                        self._center_head()
+                        self._announce("Goal locked.", priority=True)
+                        return True
+                else:
+                    yaw_misses += 1
+                    # Debug: show raw memory data
+                    raw_blobs = self._read_color_blobs()
+                    if not raw_blobs and CALIB_VERBOSE_YAW:
+                        print("[CALIB] no blobs in ALMemory at yaw={:.1f}".format(yaw))
+                        sys.stdout.flush()
+                
+                # Fall back to frame-based HSV detection
+                if self._opencv_available:
+                    try:
+                        for camera_id in GOAL_CAMERAS:
+                            frame_goals = self._detect_goals_from_frame(camera_id)
+                            if frame_goals:
+                                self._store_goal_world_points(frame_goals)
+                                print("[CALIB] found {} goals via HSV frame cam{}".format(len(frame_goals), camera_id))
+                                sys.stdout.flush()
+                                if len(self._goal_candidates_world) >= 2 and self._select_nearest_goal_world_point():
+                                    self.motion.stopMove()
+                                    self._center_head()
+                                    self._announce("Goal locked.", priority=True)
+                                    return True
+                    except Exception as e:
+                        print("[CALIB] frame detection failed: {}".format(e))
+                        sys.stdout.flush()
+                else:
+                    pass
+
+            print("[CALIB] sweep {} summary: goal_hits={} misses={} candidates={} rgb(frames={} accept={} no_yellow={} clusters={} rejects[s={},sh={},sc={},d={}])".format(
+                step + 1,
+                yaw_hits,
+                yaw_misses,
+                len(self._goal_candidates_world),
+                self._rgb_stats["frames"],
+                self._rgb_stats["accept"],
+                self._rgb_stats["no_yellow"],
+                self._rgb_stats["clusters"],
+                self._rgb_stats["reject_size"],
+                self._rgb_stats["reject_shape"],
+                self._rgb_stats["reject_score"],
+                self._rgb_stats["reject_dist"]))
+            sys.stdout.flush()
 
             if not self._running:
                 break
@@ -1199,11 +1713,11 @@ class Soccer1v1(object):
                 try:
                     self.motion.moveTo(0.0, 0.0, math.pi / 2.0)
                 except Exception:
-                    pass
+                    self._log_ignored_exception("goal calibration body turn failed")
 
         self.motion.stopMove()
         self._center_head()
-        if self._goal_left or self._goal_right:
+        if len(self._goal_candidates_world) >= 2 and self._select_nearest_goal_world_point():
             self._announce("One goal visible.", priority=True)
             return True
 
@@ -1241,28 +1755,81 @@ class Soccer1v1(object):
     def _find_ball_for_lineup(self):
         """Scan all around until the red ball is visible."""
         found = [None]
+        confirmed_hits = [0]
+        start = time.time()
         self._set_camera(BALL_CAMERA)
         # Tilt head down, the ball is on the ground
-        self._set_head_pitch(0.4)
+        self._set_head_pitch(BALL_HEAD_PITCH)
         time.sleep(0.2)
+        try:
+            # Clear stale ALMemory hit so lineup does not immediately "find" an old ball.
+            self.memory.insertData("redBallDetected", [])
+        except Exception:
+            pass
         self._setup_red_ball_blob_detection()
 
         def seen_ball():
-            found[0] = self._read_ball() or self._detect_red_ball_blob()
-            if found[0] is not None and not self._ball_visible:
-                print("[BALL] detected by red blob")
+            result = self._read_ball()
+            if result is None:
+                confirmed_hits[0] = 0
+                return False
+            found[0] = result
+            confirmed_hits[0] += 1
+            if confirmed_hits[0] < max(1, BALL_CONFIRM_HITS):
+                print("[BALL] candidate seen; waiting for confirmation {}/{}".format(
+                    confirmed_hits[0], max(1, BALL_CONFIRM_HITS)))
+                sys.stdout.flush()
+                return False
+            if not self._ball_visible:
+                print("[BALL] confirmed detection")
                 self._ball_visible = True
-            return found[0] is not None
+            return True
 
-        max_seconds = LINEUP_BALL_TIMEOUT if LINEUP_BALL_TIMEOUT > 0 else None
-        while self._running:
-            if self._full_body_scan(
-                    "Scanning all around for red ball.",
-                    stop_when=seen_ball,
-                    max_seconds=max_seconds):
+        max_seconds = LINEUP_BALL_TIMEOUT if LINEUP_BALL_TIMEOUT > 0 else BALL_SCAN_SECONDS
+        cycle = 0
+        while self._running and (time.time() - start) < max_seconds:
+            cycle += 1
+            print("[BALL] lineup scan cycle {} of {}".format(cycle, BALL_SCAN_CYCLES))
+            sys.stdout.flush()
+            for yaw in HEAD_SCAN_YAWS:
+                if not self._running or (time.time() - start) >= max_seconds:
+                    break
+                self._set_head_yaw(yaw)
+                time.sleep(0.35)
+                raw = self._read_ball()
+                print("[BALL] yaw={:.1f} raw={}".format(yaw, raw))
+                sys.stdout.flush()
+                if raw is not None:
+                    found[0] = raw
+                    confirmed_hits[0] += 1
+                    if confirmed_hits[0] >= max(1, BALL_CONFIRM_HITS):
+                        if not self._ball_visible:
+                            print("[BALL] confirmed detection")
+                            self._ball_visible = True
+                        return found[0]
+                else:
+                    confirmed_hits[0] = 0
+                # Candidate seen but not yet confirmed, so: recheck in-place before moving head
+                if confirmed_hits[0] > 0:
+                    time.sleep(0.25)
+                    if seen_ball():
+                        return found[0]
+            if cycle >= BALL_SCAN_CYCLES:
+                break
+            try:
+                t = threading.Thread(target=self.motion.moveTo, args=(0.0, 0.0, math.pi / 2.0))
+                t.daemon = True
+                t.start()
+                t.join(timeout=4.0)
+            except Exception:
+                pass
+            time.sleep(0.2)
+            if seen_ball():
                 return found[0]
-            if max_seconds is not None:
-                return None
+            if confirmed_hits[0] > 0:
+                time.sleep(0.25)
+                if seen_ball():
+                    return found[0]
             self._announce("Still looking for red ball.", priority=True)
         return None
 
@@ -1298,6 +1865,7 @@ class Soccer1v1(object):
             self._announce("I cannot see the red ball.", priority=True)
             return False
 
+        self._announce("Lining up.", priority=True)
         goal_world = self._goal_world_point()
         if goal_world is None:
             print("[LINEUP] _goal_world_point is None - goals were never detected")
@@ -1359,12 +1927,11 @@ class Soccer1v1(object):
             time.sleep(0.3)
         except Exception:
             pass
-        self._announce("Lining up.", priority=True)
         lined_up = self._move_between_goal_and_ball()
         self.motion.stopMove()
         self._center_head()
         if not lined_up:
-            self._announce("Lineup failed. Could not find ball or goal.", priority=True)
+            self._announce("Lineup failed.", priority=True)
             return
         if self._asr_ready:
             try:
@@ -1554,15 +2121,44 @@ class Soccer1v1(object):
             vot.start()
 
             # Game init sequence
-            while self._running and not self._calibrate_goals():
-                print("[GOAL] calibration retrying; press Ctrl-C to stop.")
+            max_calib_attempts = int(os.environ.get("MAX_CALIB_ATTEMPTS", "3"))
+            calib_attempts = 0
+            calibration_succeeded = False
+            while self._running and calib_attempts < max_calib_attempts:
+                if self._calibrate_goals():
+                    calibration_succeeded = True
+                    break
+                print("[GOAL] calibration attempt {} of {}; press Ctrl-C to stop.".format(
+                    calib_attempts + 1, max_calib_attempts))
                 sys.stdout.flush()
                 time.sleep(1.0)
+                calib_attempts += 1
+            if not calibration_succeeded:
+                print("[GOAL] Goal calibration failed after {} attempts. Aborting lineup.".format(
+                    max_calib_attempts))
+                sys.stdout.flush()
+                self._announce("Calibration failed. Cannot proceed without goal detection.", priority=True)
+                return
 
-            self._lineup()
-
-            # Wait for "go" command to enter PLAYING state
-            print("Waiting for 'go' command...")
+            max_lineup_attempts = int(os.environ.get("MAX_LINEUP_ATTEMPTS", "3"))
+            lineup_succeeded = False
+            for lineup_attempt in range(1, max_lineup_attempts + 1):
+                if not self._running:
+                    break
+                print("[LINEUP] attempt {} of {}".format(lineup_attempt, max_lineup_attempts))
+                sys.stdout.flush()
+                self._lineup()
+                if self._get_motion_state() == S_STOPPED:
+                    lineup_succeeded = True
+                    break
+                print("[LINEUP] attempt {} failed; retrying...".format(lineup_attempt))
+                sys.stdout.flush()
+                time.sleep(1.0)
+            if not lineup_succeeded:
+                print("[LINEUP] all {} attempts failed. Aborting.".format(max_lineup_attempts))
+                sys.stdout.flush()
+                self._announce("Lineup failed completely.", priority=True)
+                return
             while self._running and self._get_motion_state() != S_WALKING:
                 time.sleep(0.5)
             self._set_game_state(GAME_PLAYING)
