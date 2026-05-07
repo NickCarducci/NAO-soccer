@@ -94,8 +94,8 @@ ROBOT_NAMES = {
 }
 
 ROBOT_IPS = {
-    1: "172.16.0.29",
-    2: "172.16.0.3",
+    1: "172.16.0.5",
+    2: "172.16.0.144",
 }
 
 def _launch_both_players():
@@ -243,7 +243,7 @@ GOAL_USE_MESH_BONUS = int(os.environ.get("GOAL_USE_MESH_BONUS", "0"))
 GOAL_MIN_CONFIRM_SAMPLES = int(os.environ.get("GOAL_MIN_CONFIRM_SAMPLES", "2"))
 GOAL_WORLD_CLUSTER_TOL = float(os.environ.get("GOAL_WORLD_CLUSTER_TOL", "1.0"))
 GOAL_DEBUG = int(os.environ.get("GOAL_DEBUG", "0"))
-VERBOSE = int(os.environ.get("VERBOSE", "0"))
+VERBOSE = int(os.environ.get("VERBOSE", "1"))
 GOAL_VERBOSE_REJECTS = int(os.environ.get("GOAL_VERBOSE_REJECTS", "0"))
 GOAL_LOG_THROTTLE_SEC = float(os.environ.get("GOAL_LOG_THROTTLE_SEC", "1.5"))
 CALIB_VERBOSE_YAW = int(os.environ.get("CALIB_VERBOSE_YAW", "0"))
@@ -480,8 +480,15 @@ class Soccer1v1(object):
             self.video.setActiveCamera(GOAL_CAMERA)
             print("[SETUP] Red ball camera: {}".format(BALL_CAMERA))
             self.ball.subscribe(SUBSCRIPTION)
+            print("[SETUP] ALRedBallDetection subscribed OK")
         except Exception as e:
             print("WARNING: Could not subscribe to red ball detection: {}".format(e))
+        try:
+            _subs = self.ball.getSubscribersInfo()
+            print("[SETUP] ALRedBallDetection subscribers: {}".format(_subs))
+        except Exception as e:
+            print("[SETUP] Could not get ball subscribers: {}".format(e))
+        sys.stdout.flush()
 
         print("[SETUP] Configuring color blob detection...")
         sys.stdout.flush()
@@ -647,15 +654,16 @@ class Soccer1v1(object):
         try:
             data = self.memory.getData("redBallDetected")
             if data and len(data) > 1 and isinstance(data[1], (list, tuple)) and len(data[1]) >= 3:
-                azimuth = float(data[1][0])
-                angular_size = float(data[1][2])
-                dist = (0.1 / angular_size) if angular_size > 1e-4 else 1.0
-                ball_result = (azimuth, dist)
-                if not self._ball_visible:
-                    print("[BALL] detected via ALRedBallDetection azi={:.3f} dist={:.2f}".format(azimuth, dist))
-                    self._ball_visible = True
-                self._ball_miss_count = 0
-                return ball_result
+                confidence = data[4] if len(data) > 4 else 1
+                if confidence:
+                    azimuth = float(data[1][0])
+                    angular_size = float(data[1][2])
+                    dist = (0.1 / angular_size) if angular_size > 1e-4 else 1.0
+                    if not self._ball_visible:
+                        print("[BALL] detected via ALRedBallDetection azi={:.3f} dist={:.2f}".format(azimuth, dist))
+                        self._ball_visible = True
+                    self._ball_miss_count = 0
+                    return (azimuth, dist)
         except Exception as _ball_ex:
             print("[BALL] ALRedBallDetection parse error: {}".format(_ball_ex))
             sys.stdout.flush()
@@ -1742,12 +1750,18 @@ class Soccer1v1(object):
         # Tilt head down, the ball is on the ground
         self._set_head_pitch(BALL_HEAD_PITCH)
         time.sleep(0.2)
+        self._setup_red_ball_blob_detection()
+        # Look straight for 0.8s to give ALRedBallDetection time to activate before sweeping.
+        self._center_head()
+        self._set_head_pitch(BALL_HEAD_PITCH)
+        time.sleep(0.8)
+        # Only clear stale data if it's clearly stale (empty or very old).
         try:
-            # Clear stale ALMemory hit so lineup does not immediately "find" an old ball.
-            self.memory.insertData("redBallDetected", [])
+            _existing = self.memory.getData("redBallDetected")
+            if not _existing:
+                self.memory.insertData("redBallDetected", [])
         except Exception:
             pass
-        self._setup_red_ball_blob_detection()
 
         def seen_ball():
             result = self._read_ball()
@@ -1769,7 +1783,12 @@ class Soccer1v1(object):
         cycle = 0
         while self._running and (time.time() - start) < max_seconds:
             cycle += 1
-            # print("[BALL] lineup scan cycle {} of {}".format(cycle, BALL_SCAN_CYCLES))
+            print("[BALL] scan cycle {}".format(cycle))
+            try:
+                _raw = self.memory.getData("redBallDetected")
+                print("[BALL] raw ALMemory redBallDetected: {}".format(_raw))
+            except Exception as _re:
+                print("[BALL] ALMemory read error: {}".format(_re))
             sys.stdout.flush()
             # Continuous sweep: alternate direction each cycle for even coverage.
             b_start = HEAD_SCAN_YAWS[0] if cycle % 2 == 1 else HEAD_SCAN_YAWS[-1]
@@ -1839,7 +1858,7 @@ class Soccer1v1(object):
 
             last_ball = ball
             ball_azi, ball_dist = ball
-            if abs(ball_azi) < 0.08:
+            if abs(ball_azi) < 0.04:
                 self.motion.stopMove()
                 return ball
 
@@ -1863,15 +1882,16 @@ class Soccer1v1(object):
 
         self._announce("Lining up.", priority=True)
 
-        # Step 1: face the ball first, then walk straight toward it.
+        # Step 1: center head so camera azimuth == body azimuth, then face ball, then walk.
         CLOSE_RANGE = 0.45  # meters: close enough for precise positioning
+        self._center_head()
+        time.sleep(0.3)
         ball_azi, ball_dist = ball
-        # Turn to face ball by actually tracking it, which is more reliable than blind azimuth rotation.
         ball = self._face_ball(timeout=3.0) or ball
         ball_azi, ball_dist = ball
         if ball_dist > CLOSE_RANGE:
             walk_dist = ball_dist - CLOSE_RANGE
-            print("[LINEUP] walking {:.2f}m straight to ball".format(walk_dist))
+            print("[LINEUP] walking {:.2f}m to ball (azi={:.2f})".format(walk_dist, ball_azi))
             sys.stdout.flush()
             try:
                 t = threading.Thread(target=self.motion.moveTo, args=(walk_dist, 0.0, 0.0))
@@ -1884,45 +1904,6 @@ class Soccer1v1(object):
                     return False
             except Exception:
                 pass
-
-        # Step 2b.5: arc sideways around the ball toward the own-goal side.
-        # Quick goal re-detect to find which lateral direction is "toward own goal."
-        time.sleep(0.2)
-        global GOAL_DEBUG
-        _prev_dbg = GOAL_DEBUG
-        GOAL_DEBUG = 0
-        self._setup_goal_blob_detection()
-        time.sleep(0.2)
-        _goal_azi = None
-        for _yaw in HEAD_SCAN_YAWS:
-            if not self._running:
-                break
-            self._set_head_yaw(_yaw)
-            time.sleep(0.25)
-            _gs = self._detect_goals()
-            if _gs and len(_gs[0]) >= 5:
-                _goal_azi = float(_gs[0][3])
-                break
-        self._center_head()
-        GOAL_DEBUG = _prev_dbg
-        self._setup_red_ball_blob_detection()
-        time.sleep(0.2)
-
-        if _goal_azi is not None and self._running:
-            # Arc around the ball toward own goal's side.
-            # NAO arcs by combining forward walk with a turn; pure lateral doesn't move reliably.
-            arc_dir = 1 if _goal_azi >= 0 else -1
-            print("[LINEUP] arcing goal_azi={:.2f}".format(_goal_azi))
-            sys.stdout.flush()
-            arc_end = time.time() + 2.5
-            while self._running and time.time() < arc_end:
-                _b = self._read_ball()
-                if _b is None:
-                    break
-                # Walk slowly while turning to arc around the ball.
-                self.motion.moveToward(0.18, 0.0, 0.55 * arc_dir)
-                time.sleep(0.10)
-            self.motion.stopMove()
 
         # Step 3: center head then face the ball so azimuth is in body frame.
         self._center_head()
@@ -1950,7 +1931,12 @@ class Soccer1v1(object):
         self.motion.stopMove()
         self._center_head()
         if not lined_up:
-            self._announce("Lineup failed.", priority=True)
+            # Announce failure only after several retries to avoid noisy speech on first miss.
+            if getattr(self, '_lineup_fail_count', 0) >= 2:
+                self._announce("Still looking.", priority=True)
+                self._lineup_fail_count = 0
+            else:
+                self._lineup_fail_count = getattr(self, '_lineup_fail_count', 0) + 1
             return
         if self._asr_ready:
             try:
